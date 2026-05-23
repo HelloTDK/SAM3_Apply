@@ -1,0 +1,54 @@
+# Python cache/build artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+build/
+dist/
+*.egg-info/
+
+# Virtual environments and vendored dependencies
+.venv/
+venv/
+env/
+_vendor/
+
+# Local secrets and environment
+.env
+.env.*
+api_keys.json
+*.pem
+*.key
+
+# Runtime outputs
+uploads/
+results/
+logs/
+*.log
+
+# Local caches
+.matplotlib/
+.cache/
+
+# Large model/data artifacts
+weights/
+argos_models/
+argos-packages/
+assets/*.gz
+*.pt
+*.pth
+*.onnx
+*.engine
+*.safetensors
+*.argosmodel
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo

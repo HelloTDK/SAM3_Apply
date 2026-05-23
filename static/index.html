@@ -1,0 +1,1462 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SAM3 目标检测服务</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1000px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            padding: 40px;
+        }
+
+        h1 {
+            text-align: center;
+            color: #667eea;
+            margin-bottom: 10px;
+            font-size: 2.5em;
+        }
+
+        .subtitle {
+            text-align: center;
+            color: #666;
+            margin-bottom: 40px;
+            font-size: 1.1em;
+        }
+
+        .upload-section {
+            background: #f8f9fa;
+            border-radius: 15px;
+            padding: 30px;
+            margin-bottom: 30px;
+        }
+
+        .section-title {
+            color: #344054;
+            font-size: 1.35em;
+            margin-bottom: 18px;
+        }
+
+        .two-col {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
+        }
+
+        @media (max-width: 860px) {
+            .two-col {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        .form-group {
+            margin-bottom: 25px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 10px;
+            color: #333;
+            font-weight: 600;
+            font-size: 1.1em;
+        }
+
+        input[type="file"] {
+            display: block;
+            width: 100%;
+            padding: 15px;
+            border: 2px dashed #667eea;
+            border-radius: 10px;
+            background: white;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+
+        input[type="file"]:hover {
+            border-color: #764ba2;
+            background: #f0f0ff;
+        }
+
+        input[type="text"] {
+            width: 100%;
+            padding: 15px;
+            border: 2px solid #e0e0e0;
+            border-radius: 10px;
+            font-size: 1em;
+            transition: all 0.3s;
+        }
+
+        input[type="text"]:focus {
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+        }
+
+        .slider-container {
+            margin-top: 10px;
+        }
+
+        .manager-row {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+
+        .manager-row input[type="text"],
+        .manager-row input[type="number"],
+        .manager-row select {
+            flex: 1;
+        }
+
+        input[type="number"], select {
+            width: 100%;
+            padding: 15px;
+            border: 2px solid #e0e0e0;
+            border-radius: 10px;
+            font-size: 1em;
+            transition: all 0.3s;
+            background: #fff;
+        }
+
+        input[type="number"]:focus, select:focus {
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+        }
+
+        .small-btn {
+            padding: 10px 14px;
+            border: 1px solid #d0d5dd;
+            background: #fff;
+            border-radius: 10px;
+            cursor: pointer;
+            color: #344054;
+            font-size: 0.9em;
+            white-space: nowrap;
+        }
+
+        .small-btn:hover {
+            background: #f8fafc;
+        }
+
+        .hint {
+            color: #666;
+            font-size: 0.9em;
+            margin-top: 8px;
+        }
+
+        .key-manager-section {
+            background: #f8f9fa;
+            border-radius: 15px;
+            padding: 30px;
+            margin-bottom: 30px;
+        }
+
+        .manager-title {
+            color: #344054;
+            font-size: 1.3em;
+            margin-bottom: 16px;
+        }
+
+        .keys-list {
+            margin-top: 16px;
+            display: grid;
+            gap: 10px;
+        }
+
+        .key-item {
+            background: #fff;
+            border: 1px solid #e5e7eb;
+            border-radius: 10px;
+            padding: 12px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .key-meta {
+            font-size: 0.9em;
+            color: #475467;
+            line-height: 1.4;
+        }
+
+        .key-actions {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            justify-content: flex-end;
+        }
+
+        .plain-key-box {
+            margin-top: 8px;
+            padding: 8px 10px;
+            border-radius: 8px;
+            border: 1px dashed #cbd5e1;
+            background: #f8fafc;
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+            font-size: 0.86em;
+            color: #0f172a;
+            word-break: break-all;
+            display: none;
+        }
+
+        .badge {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 999px;
+            font-size: 0.8em;
+            font-weight: 600;
+            margin-right: 6px;
+        }
+
+        .badge-admin {
+            background: #fee2e2;
+            color: #b42318;
+        }
+
+        .badge-client {
+            background: #dbeafe;
+            color: #1d4ed8;
+        }
+
+        .badge-enabled {
+            background: #dcfce7;
+            color: #166534;
+        }
+
+        .badge-disabled {
+            background: #f3f4f6;
+            color: #6b7280;
+        }
+
+        input[type="range"] {
+            width: 100%;
+            height: 8px;
+            border-radius: 5px;
+            background: #e0e0e0;
+            outline: none;
+            -webkit-appearance: none;
+        }
+
+        input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            background: #667eea;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+
+        input[type="range"]::-webkit-slider-thumb:hover {
+            background: #764ba2;
+            transform: scale(1.2);
+        }
+
+        input[type="range"]::-moz-range-thumb {
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            background: #667eea;
+            cursor: pointer;
+            border: none;
+            transition: all 0.3s;
+        }
+
+        input[type="range"]::-moz-range-thumb:hover {
+            background: #764ba2;
+            transform: scale(1.2);
+        }
+
+        .confidence-value {
+            display: inline-block;
+            background: #667eea;
+            color: white;
+            padding: 5px 15px;
+            border-radius: 20px;
+            font-weight: 600;
+            margin-left: 10px;
+        }
+
+        .example-prompts {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+            margin-top: 10px;
+        }
+
+        .example-btn {
+            padding: 8px 15px;
+            background: #e0e7ff;
+            border: none;
+            border-radius: 20px;
+            cursor: pointer;
+            color: #667eea;
+            font-size: 0.9em;
+            transition: all 0.3s;
+        }
+
+        .example-btn:hover {
+            background: #667eea;
+            color: white;
+            transform: translateY(-2px);
+        }
+
+        .submit-btn {
+            width: 100%;
+            padding: 18px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 10px;
+            font-size: 1.2em;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+            box-shadow: 0 4px 15px rgba(102, 126, 234, 0.4);
+        }
+
+        .submit-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(102, 126, 234, 0.6);
+        }
+
+        .submit-btn:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .preview-section {
+            margin-top: 30px;
+        }
+
+        .preview-image {
+            max-width: 100%;
+            border-radius: 10px;
+            margin-top: 15px;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1);
+        }
+
+        .preview-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+            gap: 12px;
+        }
+
+        .query-result-card {
+            background: white;
+            border-radius: 10px;
+            padding: 14px;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.05);
+        }
+
+        .query-result-title {
+            color: #344054;
+            font-weight: 700;
+            margin-bottom: 8px;
+            word-break: break-all;
+        }
+
+        .query-result-meta {
+            color: #667085;
+            font-size: 0.9em;
+            line-height: 1.5;
+            margin-bottom: 8px;
+        }
+
+        .draw-wrap {
+            margin-top: 12px;
+            position: relative;
+            display: inline-block;
+            max-width: 100%;
+            border-radius: 10px;
+            overflow: hidden;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1);
+            background: #fff;
+        }
+
+        .draw-wrap img {
+            display: block;
+            max-width: 100%;
+            height: auto;
+        }
+
+        .draw-canvas {
+            position: absolute;
+            left: 0;
+            top: 0;
+            cursor: crosshair;
+        }
+
+        .draw-actions {
+            margin-top: 8px;
+            display: flex;
+            gap: 8px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+
+        .draw-tip {
+            font-size: 0.9em;
+            color: #666;
+        }
+
+        .result-images {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 16px;
+        }
+
+        @media (max-width: 860px) {
+            .result-images {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        .result-section {
+            background: #f8f9fa;
+            border-radius: 15px;
+            padding: 30px;
+            margin-top: 30px;
+            display: none;
+        }
+
+        .result-section.show {
+            display: block;
+            animation: fadeIn 0.5s;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(20px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .result-info {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+
+        .info-card {
+            background: white;
+            padding: 15px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.05);
+        }
+
+        .info-label {
+            color: #666;
+            font-size: 0.9em;
+            margin-bottom: 5px;
+        }
+
+        .info-value {
+            color: #333;
+            font-size: 1.3em;
+            font-weight: 600;
+        }
+
+        .loading {
+            text-align: center;
+            padding: 30px;
+            display: none;
+        }
+
+        .loading.show {
+            display: block;
+        }
+
+        .spinner {
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #667eea;
+            border-radius: 50%;
+            width: 50px;
+            height: 50px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 15px;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .error {
+            background: #fee;
+            color: #c00;
+            padding: 15px;
+            border-radius: 10px;
+            margin-top: 15px;
+            display: none;
+        }
+
+        .error.show {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎯 SAM3 目标检测服务</h1>
+        <p class="subtitle">上传图片并输入要检测的目标，获取智能识别结果</p>
+
+        <div class="upload-section">
+            <form id="uploadForm">
+                <div class="form-group">
+                    <label for="imageFile">📷 选择图片</label>
+                    <input type="file" id="imageFile" name="file" accept="image/*" required>
+                    <div id="preview" class="preview-section"></div>
+                </div>
+
+                <div class="form-group">
+                    <label for="promptText">🔍 输入检测目标（支持中文自动翻译）</label>
+                    <input type="text" id="promptText" name="prompt" placeholder="例如: 人, 汽车, 猫, 狗 或 person, car, cat, dog" required>
+                    <div class="example-prompts">
+                        <button type="button" class="example-btn" onclick="setPrompt('人')">人</button>
+                        <button type="button" class="example-btn" onclick="setPrompt('汽车')">汽车</button>
+                        <button type="button" class="example-btn" onclick="setPrompt('猫')">猫</button>
+                        <button type="button" class="example-btn" onclick="setPrompt('狗')">狗</button>
+                        <button type="button" class="example-btn" onclick="setPrompt('车牌')">车牌</button>
+                        <button type="button" class="example-btn" onclick="setPrompt('person')">person</button>
+                        <button type="button" class="example-btn" onclick="setPrompt('car')">car</button>
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label for="confidenceSlider">
+                        🎯 置信度阈值
+                        <span class="confidence-value" id="confidenceValue">0.30</span>
+                    </label>
+                    <div class="slider-container">
+                        <input type="range" id="confidenceSlider" name="confidence" min="0.01" max="1.0" step="0.01" value="0.30">
+                    </div>
+                    <p style="color: #666; font-size: 0.9em; margin-top: 8px;">
+                        只显示置信度大于等于此值的检测结果（范围: 0.01 - 1.00）
+                    </p>
+                </div>
+
+                <button type="submit" class="submit-btn" id="submitBtn">🚀 开始检测</button>
+            </form>
+        </div>
+
+        <div class="upload-section">
+            <h2 class="section-title">🧭 相似目标识别测试</h2>
+            <form id="similarForm">
+                <div class="two-col">
+                    <div class="form-group">
+                        <label for="referenceImageFile">🖼️ 示例图 / 同图识别图</label>
+                        <input type="file" id="referenceImageFile" name="reference_file" accept="image/*" required>
+                        <div class="draw-wrap" id="referenceDrawWrap" style="display:none;">
+                            <img id="referenceDrawImage" alt="样图预览">
+                            <canvas id="referenceDrawCanvas" class="draw-canvas"></canvas>
+                        </div>
+                        <div class="draw-actions">
+                            <button type="button" class="small-btn" id="clearReferenceBoxBtn">清除样图框</button>
+                            <span class="draw-tip">在图上拖拽鼠标画示例目标框，坐标会自动填入下方输入框</span>
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label for="queryImageFile">🎯 待识别图</label>
+                        <input type="file" id="queryImageFile" name="query_file" accept="image/*" multiple required>
+                        <div id="queryPreview" class="preview-section"></div>
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label for="referenceBndPoints">📦 示例目标框（必填）</label>
+                    <input type="text" id="referenceBndPoints" name="reference_bnd_points" required placeholder="必须填写 x,y,w,h，例如 120,80,260,300">
+                    <p class="hint">请输入示例目标的像素框坐标：x,y,w,h。</p>
+                </div>
+
+                <div class="form-group" id="similarPromptGroup">
+                    <label for="similarPromptText">🔤 相似目标文本描述</label>
+                    <input type="text" id="similarPromptText" name="prompt" placeholder="例如：红色安全帽、白色车辆、穿反光背心的人">
+                    <p class="hint">可选；拼接模式填写后会和示例框一起传给 SAM3。</p>
+                </div>
+
+                <div class="two-col">
+                    <div class="form-group">
+                        <label for="similarTopK">🔢 候选框数量 Top-K</label>
+                        <input type="number" id="similarTopK" name="top_k" min="1" max="20" step="1" value="5">
+                    </div>
+                    <div class="form-group">
+                        <label for="similarMode">🧪 相似识别模式</label>
+                        <select id="similarMode" name="similar_mode">
+                            <option value="same_image_prompt">同图拉框 + SAM3 原生 visual prompt</option>
+                            <option value="concat_prompt">拼接图 + SAM3 visual prompt</option>
+                            <option value="feature_match">特征粗检 + SAM3 精分割</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="two-col">
+                    <div class="form-group">
+                        <label for="similarSamThreshold">
+                            🎯 SAM 阈值
+                            <span class="confidence-value" id="similarSamThresholdValue">0.20</span>
+                        </label>
+                        <div class="slider-container">
+                            <input type="range" id="similarSamThreshold" name="sam_threshold" min="0.0" max="1.0" step="0.01" value="0.20">
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label for="similarityThreshold">
+                            📐 相似度阈值
+                            <span class="confidence-value" id="similarityThresholdValue">0.60</span>
+                        </label>
+                        <div class="slider-container">
+                            <input type="range" id="similarityThreshold" name="similarity_threshold" min="-1.0" max="1.0" step="0.01" value="0.60">
+                        </div>
+                    </div>
+                </div>
+
+                <button type="submit" class="submit-btn" id="similarSubmitBtn">🔍 开始相似目标识别</button>
+            </form>
+        </div>
+
+        <div class="key-manager-section">
+            <h2 class="manager-title">🔐 API Key 管理</h2>
+            <div class="form-group">
+                <label for="newKeyName">Key 名称</label>
+                <input type="text" id="newKeyName" placeholder="例如：server-a">
+            </div>
+            <div class="form-group manager-row">
+                <div style="flex: 1;">
+                    <label for="newKeyRole">角色</label>
+                    <select id="newKeyRole">
+                        <option value="client">client</option>
+                        <option value="admin">admin</option>
+                    </select>
+                </div>
+                <div style="flex: 1;">
+                    <label for="newKeyExpires">过期天数（可选）</label>
+                    <input type="number" id="newKeyExpires" min="1" placeholder="例如：180">
+                </div>
+                <button type="button" class="small-btn" id="createKeyBtn" style="margin-top: 34px;">生成 Key</button>
+            </div>
+            <p class="hint">新生成的 `api_key` 仅显示一次，请立即保存。</p>
+            <p class="hint">支持点击“查看 Key”显示已在本浏览器保存的明文 Key。</p>
+            <div id="newKeyOutput" class="info-card" style="display:none; margin-top:10px;"></div>
+            <div class="keys-list" id="keysList"></div>
+        </div>
+
+        <div class="loading" id="loading">
+            <div class="spinner"></div>
+            <p>正在处理中，请稍候...</p>
+        </div>
+
+        <div class="error" id="error"></div>
+
+        <div class="result-section" id="resultSection">
+            <h2 style="margin-bottom: 20px; color: #667eea;">✨ 检测结果</h2>
+            <div class="result-info" id="resultInfo"></div>
+            <div class="result-images">
+                <div>
+                    <div class="hint">示例目标分割结果（SAM+box）</div>
+                    <img id="referenceResultImage" class="preview-image" alt="样图识别结果" style="display:none;">
+                </div>
+                <div>
+                    <div class="hint">图2相似目标比对结果</div>
+                    <img id="resultImage" class="preview-image" alt="比对结果" style="display:none;">
+                </div>
+            </div>
+            <div id="concatDebugSection" style="display:none; margin-top:16px;">
+                <div class="hint">拼接调试图（用于确认参考目标是否正确拼接）</div>
+                <div id="concatDebugImages" class="preview-section"></div>
+            </div>
+            <div id="queryResultsList" class="preview-section"></div>
+        </div>
+    </div>
+
+    <script>
+        const form = document.getElementById('uploadForm');
+        const fileInput = document.getElementById('imageFile');
+        const preview = document.getElementById('preview');
+        const similarForm = document.getElementById('similarForm');
+        const referenceImageFile = document.getElementById('referenceImageFile');
+        const queryImageFile = document.getElementById('queryImageFile');
+        const similarModeSelect = document.getElementById('similarMode');
+        const referenceDrawWrap = document.getElementById('referenceDrawWrap');
+        const referenceDrawImage = document.getElementById('referenceDrawImage');
+        const referenceDrawCanvas = document.getElementById('referenceDrawCanvas');
+        const clearReferenceBoxBtn = document.getElementById('clearReferenceBoxBtn');
+        const queryPreview = document.getElementById('queryPreview');
+        const similarSubmitBtn = document.getElementById('similarSubmitBtn');
+        const similarSamThreshold = document.getElementById('similarSamThreshold');
+        const similarSamThresholdValue = document.getElementById('similarSamThresholdValue');
+        const similarityThreshold = document.getElementById('similarityThreshold');
+        const similarityThresholdValue = document.getElementById('similarityThresholdValue');
+        const loading = document.getElementById('loading');
+        const error = document.getElementById('error');
+        const resultSection = document.getElementById('resultSection');
+        const resultInfo = document.getElementById('resultInfo');
+        const referenceResultImage = document.getElementById('referenceResultImage');
+        const resultImage = document.getElementById('resultImage');
+        const concatDebugSection = document.getElementById('concatDebugSection');
+        const concatDebugImages = document.getElementById('concatDebugImages');
+        const queryResultsList = document.getElementById('queryResultsList');
+        const submitBtn = document.getElementById('submitBtn');
+        const newKeyName = document.getElementById('newKeyName');
+        const newKeyRole = document.getElementById('newKeyRole');
+        const newKeyExpires = document.getElementById('newKeyExpires');
+        const createKeyBtn = document.getElementById('createKeyBtn');
+        const newKeyOutput = document.getElementById('newKeyOutput');
+        const keysList = document.getElementById('keysList');
+        const PLAIN_KEYS_STORAGE = 'sam3_plain_api_keys_v1';
+        let plainKeysMap = {};
+
+        function escapeHtml(text) {
+            return String(text || '')
+                .replaceAll('&', '&amp;')
+                .replaceAll('<', '&lt;')
+                .replaceAll('>', '&gt;')
+                .replaceAll('"', '&quot;')
+                .replaceAll("'", '&#039;');
+        }
+
+        function formatDate(isoString) {
+            if (!isoString) return '-';
+            const d = new Date(isoString);
+            if (Number.isNaN(d.getTime())) return isoString;
+            return d.toLocaleString();
+        }
+
+        function loadPlainKeysMap() {
+            try {
+                const raw = localStorage.getItem(PLAIN_KEYS_STORAGE);
+                if (!raw) return {};
+                const parsed = JSON.parse(raw);
+                if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+                    return {};
+                }
+                return parsed;
+            } catch (_err) {
+                return {};
+            }
+        }
+
+        function savePlainKeysMap() {
+            try {
+                localStorage.setItem(PLAIN_KEYS_STORAGE, JSON.stringify(plainKeysMap));
+            } catch (_err) {
+                // ignore localStorage failures
+            }
+        }
+
+        function upsertPlainKey(record) {
+            if (!record || !record.id || !record.api_key) return;
+            plainKeysMap[record.id] = {
+                id: record.id,
+                api_key: record.api_key,
+                name: record.name || '',
+                role: record.role || 'client',
+                created_at: record.created_at || '',
+                saved_at: new Date().toISOString(),
+            };
+            savePlainKeysMap();
+        }
+
+        function removePlainKey(keyId) {
+            if (!keyId) return;
+            if (plainKeysMap[keyId]) {
+                delete plainKeysMap[keyId];
+                savePlainKeysMap();
+            }
+        }
+
+        function renderKeys(keys) {
+            if (!Array.isArray(keys) || keys.length === 0) {
+                keysList.innerHTML = '<div class="key-item"><div class="key-meta">暂无 API Key，请先生成。</div></div>';
+                return;
+            }
+
+            keysList.innerHTML = keys.map((item) => {
+                const roleClass = item.role === 'admin' ? 'badge-admin' : 'badge-client';
+                const enabledClass = item.enabled ? 'badge-enabled' : 'badge-disabled';
+                const keyId = String(item.id || '');
+                const escapedKeyId = escapeHtml(keyId);
+                const plainRecord = plainKeysMap[keyId];
+                const hasPlainKey = Boolean(plainRecord && plainRecord.api_key);
+
+                const deleteBtn = item.enabled
+                    ? `<button type="button" class="small-btn" data-action="delete" data-key-id="${escapedKeyId}">删除</button>`
+                    : '';
+                const viewBtn = hasPlainKey
+                    ? `<button type="button" class="small-btn" data-action="toggle-key" data-key-id="${escapedKeyId}">查看 Key</button>`
+                    : '';
+                const copyBtn = hasPlainKey
+                    ? `<button type="button" class="small-btn" data-action="copy-key" data-key-id="${escapedKeyId}">复制 Key</button>`
+                    : '';
+                const keyNote = hasPlainKey
+                    ? `<div class="hint">明文 Key 已保存到当前浏览器</div>`
+                    : `<div class="hint">此 Key 未保存明文，无法再次查看（仅有前缀）</div>`;
+                const plainKeyBox = hasPlainKey
+                    ? `<div class="plain-key-box" data-plain-for="${escapedKeyId}">${escapeHtml(plainRecord.api_key)}</div>`
+                    : '';
+
+                return `
+                    <div class="key-item">
+                        <div class="key-meta">
+                            <div>
+                                <span class="badge ${roleClass}">${escapeHtml(item.role)}</span>
+                                <span class="badge ${enabledClass}">${item.enabled ? 'enabled' : 'disabled'}</span>
+                            </div>
+                            <div><strong>${escapeHtml(item.name)}</strong> (${escapeHtml(item.key_prefix || '')})</div>
+                            <div>id: ${escapeHtml(item.id)}</div>
+                            <div>创建时间: ${escapeHtml(formatDate(item.created_at))}</div>
+                            <div>过期时间: ${escapeHtml(formatDate(item.expires_at))}</div>
+                            ${keyNote}
+                            ${plainKeyBox}
+                        </div>
+                        <div class="key-actions">
+                            ${viewBtn}
+                            ${copyBtn}
+                            ${deleteBtn}
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        async function loadApiKeys() {
+            const response = await fetch('/ui/api-keys');
+            const data = await response.json();
+            if (!response.ok || !data.success) {
+                throw new Error(data.detail || '加载 API Key 列表失败');
+            }
+            renderKeys(data.data || []);
+        }
+
+        createKeyBtn.addEventListener('click', async function() {
+            const name = newKeyName.value.trim();
+            if (!name) {
+                alert('请输入 Key 名称');
+                return;
+            }
+
+            const role = newKeyRole.value;
+            const expiresRaw = newKeyExpires.value.trim();
+            const payload = { name, role };
+            if (expiresRaw) {
+                payload.expires_in_days = Number(expiresRaw);
+            }
+
+            createKeyBtn.disabled = true;
+            try {
+                const response = await fetch('/ui/api-keys', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload),
+                });
+                const data = await response.json();
+                if (!response.ok || !data.success) {
+                    throw new Error(data.detail || '创建 API Key 失败');
+                }
+
+                const created = data.data || {};
+                upsertPlainKey(created);
+                newKeyOutput.style.display = 'block';
+                newKeyOutput.innerHTML = `
+                    <div class="info-label">新生成的 API Key（仅展示一次）</div>
+                    <div class="info-value" style="font-size:1em; word-break: break-all;">${escapeHtml(created.api_key || '')}</div>
+                `;
+                newKeyName.value = '';
+                newKeyExpires.value = '';
+                await loadApiKeys();
+            } catch (err) {
+                alert(`创建失败: ${err.message}`);
+            } finally {
+                createKeyBtn.disabled = false;
+            }
+        });
+
+        keysList.addEventListener('click', async function(e) {
+            const btn = e.target.closest('button[data-action][data-key-id]');
+            if (!btn) return;
+            const action = btn.getAttribute('data-action');
+            const keyId = btn.getAttribute('data-key-id');
+            if (!keyId) return;
+
+            if (action === 'toggle-key') {
+                const plainBox = keysList.querySelector(`[data-plain-for="${keyId}"]`);
+                if (!plainBox) return;
+                const isShown = plainBox.style.display !== 'none';
+                plainBox.style.display = isShown ? 'none' : 'block';
+                btn.textContent = isShown ? '查看 Key' : '隐藏 Key';
+                return;
+            }
+
+            if (action === 'copy-key') {
+                const plain = plainKeysMap[keyId] && plainKeysMap[keyId].api_key;
+                if (!plain) {
+                    alert('该 Key 没有可复制的明文记录');
+                    return;
+                }
+                try {
+                    if (navigator.clipboard && navigator.clipboard.writeText) {
+                        await navigator.clipboard.writeText(plain);
+                    } else {
+                        const textarea = document.createElement('textarea');
+                        textarea.value = plain;
+                        textarea.style.position = 'fixed';
+                        textarea.style.left = '-9999px';
+                        document.body.appendChild(textarea);
+                        textarea.select();
+                        document.execCommand('copy');
+                        document.body.removeChild(textarea);
+                    }
+                    alert('API Key 已复制到剪贴板');
+                } catch (err) {
+                    alert(`复制失败: ${err.message || err}`);
+                }
+                return;
+            }
+
+            if (action !== 'delete') return;
+            if (!window.confirm(`确认删除 key: ${keyId} ?`)) return;
+
+            btn.disabled = true;
+            try {
+                const response = await fetch(`/ui/api-keys/${encodeURIComponent(keyId)}`, {
+                    method: 'DELETE',
+                });
+                const data = await response.json();
+                if (!response.ok || !data.success) {
+                    throw new Error(data.detail || '删除 API Key 失败');
+                }
+                removePlainKey(keyId);
+                await loadApiKeys();
+            } catch (err) {
+                alert(`删除失败: ${err.message}`);
+            } finally {
+                btn.disabled = false;
+            }
+        });
+
+        function bindImagePreview(inputElement, previewElement, altText) {
+            inputElement.addEventListener('change', function(e) {
+                const file = e.target.files && e.target.files[0];
+                if (!file) {
+                    previewElement.innerHTML = '';
+                    return;
+                }
+                const reader = new FileReader();
+                reader.onload = function(ev) {
+                    previewElement.innerHTML = `<img src="${ev.target.result}" class="preview-image" alt="${escapeHtml(altText)}">`;
+                };
+                reader.readAsDataURL(file);
+            });
+        }
+
+        function bindMultiImagePreview(inputElement, previewElement) {
+            inputElement.addEventListener('change', function(e) {
+                const files = Array.from(e.target.files || []);
+                if (!files.length) {
+                    previewElement.innerHTML = '';
+                    return;
+                }
+
+                previewElement.innerHTML = '<div class="preview-grid"></div>';
+                const grid = previewElement.querySelector('.preview-grid');
+                files.forEach((file, index) => {
+                    const item = document.createElement('div');
+                    item.className = 'query-result-card';
+                    item.innerHTML = `
+                        <div class="query-result-title">#${index + 1} ${escapeHtml(file.name || 'query image')}</div>
+                        <div class="query-result-meta">${Math.round(file.size / 1024)} KB</div>
+                    `;
+                    grid.appendChild(item);
+
+                    const reader = new FileReader();
+                    reader.onload = function(ev) {
+                        const img = document.createElement('img');
+                        img.src = ev.target.result;
+                        img.className = 'preview-image';
+                        img.alt = `待识别图预览 ${index + 1}`;
+                        item.appendChild(img);
+                    };
+                    reader.readAsDataURL(file);
+                });
+            });
+        }
+
+        bindImagePreview(fileInput, preview, '图片预览');
+        bindMultiImagePreview(queryImageFile, queryPreview);
+
+        function updateSimilarModeUi() {
+            const isSameImageMode = similarModeSelect.value === 'same_image_prompt';
+            const queryGroup = queryImageFile.closest('.form-group');
+            if (queryGroup) {
+                queryGroup.style.display = isSameImageMode ? 'none' : '';
+            }
+            queryImageFile.required = !isSameImageMode;
+            if (isSameImageMode) {
+                queryPreview.innerHTML = '';
+            }
+        }
+
+        similarModeSelect.addEventListener('change', updateSimilarModeUi);
+        updateSimilarModeUi();
+
+        const referenceDrawState = {
+            drawing: false,
+            startX: 0,
+            startY: 0,
+            currentX: 0,
+            currentY: 0,
+            box: null, // {x, y, w, h} in original image pixels
+        };
+
+        function getCanvasPointerPosition(evt) {
+            const rect = referenceDrawCanvas.getBoundingClientRect();
+            const x = evt.clientX - rect.left;
+            const y = evt.clientY - rect.top;
+            return { x, y };
+        }
+
+        function drawReferenceBoxOverlay(tempEnd = null) {
+            const ctx = referenceDrawCanvas.getContext('2d');
+            const displayW = referenceDrawCanvas.width;
+            const displayH = referenceDrawCanvas.height;
+            ctx.clearRect(0, 0, displayW, displayH);
+
+            let drawBox = null;
+            if (tempEnd) {
+                const x1 = Math.min(referenceDrawState.startX, tempEnd.x);
+                const y1 = Math.min(referenceDrawState.startY, tempEnd.y);
+                const x2 = Math.max(referenceDrawState.startX, tempEnd.x);
+                const y2 = Math.max(referenceDrawState.startY, tempEnd.y);
+                drawBox = { x: x1, y: y1, w: x2 - x1, h: y2 - y1 };
+            } else if (referenceDrawState.box) {
+                const sx = displayW / Math.max(1, referenceDrawImage.naturalWidth);
+                const sy = displayH / Math.max(1, referenceDrawImage.naturalHeight);
+                drawBox = {
+                    x: referenceDrawState.box.x * sx,
+                    y: referenceDrawState.box.y * sy,
+                    w: referenceDrawState.box.w * sx,
+                    h: referenceDrawState.box.h * sy,
+                };
+            }
+
+            if (!drawBox || drawBox.w < 1 || drawBox.h < 1) {
+                return;
+            }
+
+            ctx.strokeStyle = '#ff2d2d';
+            ctx.lineWidth = 2;
+            ctx.fillStyle = 'rgba(255, 45, 45, 0.12)';
+            ctx.strokeRect(drawBox.x, drawBox.y, drawBox.w, drawBox.h);
+            ctx.fillRect(drawBox.x, drawBox.y, drawBox.w, drawBox.h);
+        }
+
+        function syncReferenceBoxInput() {
+            const input = document.getElementById('referenceBndPoints');
+            if (!referenceDrawState.box) {
+                input.value = '';
+                return;
+            }
+            const { x, y, w, h } = referenceDrawState.box;
+            input.value = `${Math.round(x)},${Math.round(y)},${Math.round(w)},${Math.round(h)}`;
+        }
+
+        function resizeReferenceCanvas() {
+            if (!referenceDrawImage.src) return;
+            const displayW = referenceDrawImage.clientWidth;
+            const displayH = referenceDrawImage.clientHeight;
+            if (!displayW || !displayH) return;
+            referenceDrawCanvas.width = displayW;
+            referenceDrawCanvas.height = displayH;
+            drawReferenceBoxOverlay();
+        }
+
+        function clearReferenceBox() {
+            referenceDrawState.box = null;
+            syncReferenceBoxInput();
+            drawReferenceBoxOverlay();
+        }
+
+        clearReferenceBoxBtn.addEventListener('click', clearReferenceBox);
+
+        referenceImageFile.addEventListener('change', function(e) {
+            const file = e.target.files && e.target.files[0];
+            if (!file) {
+                referenceDrawWrap.style.display = 'none';
+                clearReferenceBox();
+                return;
+            }
+            const reader = new FileReader();
+            reader.onload = function(ev) {
+                referenceDrawImage.onload = function() {
+                    referenceDrawWrap.style.display = 'inline-block';
+                    resizeReferenceCanvas();
+                };
+                referenceDrawImage.src = ev.target.result;
+                clearReferenceBox();
+            };
+            reader.readAsDataURL(file);
+        });
+
+        referenceDrawCanvas.addEventListener('mousedown', function(evt) {
+            if (!referenceDrawImage.src) return;
+            const p = getCanvasPointerPosition(evt);
+            referenceDrawState.drawing = true;
+            referenceDrawState.startX = p.x;
+            referenceDrawState.startY = p.y;
+            referenceDrawState.currentX = p.x;
+            referenceDrawState.currentY = p.y;
+        });
+
+        referenceDrawCanvas.addEventListener('mousemove', function(evt) {
+            if (!referenceDrawState.drawing) return;
+            const p = getCanvasPointerPosition(evt);
+            referenceDrawState.currentX = p.x;
+            referenceDrawState.currentY = p.y;
+            drawReferenceBoxOverlay({ x: p.x, y: p.y });
+        });
+
+        referenceDrawCanvas.addEventListener('mouseup', function(evt) {
+            if (!referenceDrawState.drawing) return;
+            referenceDrawState.drawing = false;
+            const p = getCanvasPointerPosition(evt);
+            const x1 = Math.min(referenceDrawState.startX, p.x);
+            const y1 = Math.min(referenceDrawState.startY, p.y);
+            const x2 = Math.max(referenceDrawState.startX, p.x);
+            const y2 = Math.max(referenceDrawState.startY, p.y);
+            const w = x2 - x1;
+            const h = y2 - y1;
+            if (w < 3 || h < 3) {
+                drawReferenceBoxOverlay();
+                return;
+            }
+
+            const sx = Math.max(1, referenceDrawImage.naturalWidth) / Math.max(1, referenceDrawCanvas.width);
+            const sy = Math.max(1, referenceDrawImage.naturalHeight) / Math.max(1, referenceDrawCanvas.height);
+            referenceDrawState.box = {
+                x: x1 * sx,
+                y: y1 * sy,
+                w: w * sx,
+                h: h * sy,
+            };
+            syncReferenceBoxInput();
+            drawReferenceBoxOverlay();
+        });
+
+        referenceDrawCanvas.addEventListener('mouseleave', function() {
+            if (!referenceDrawState.drawing) return;
+            referenceDrawState.drawing = false;
+            drawReferenceBoxOverlay();
+        });
+
+        window.addEventListener('resize', function() {
+            resizeReferenceCanvas();
+        });
+
+        // Update confidence value display
+        const confidenceSlider = document.getElementById('confidenceSlider');
+        const confidenceValue = document.getElementById('confidenceValue');
+
+        confidenceSlider.addEventListener('input', function(e) {
+            confidenceValue.textContent = parseFloat(e.target.value).toFixed(2);
+        });
+
+        similarSamThreshold.addEventListener('input', function(e) {
+            similarSamThresholdValue.textContent = parseFloat(e.target.value).toFixed(2);
+        });
+
+        similarityThreshold.addEventListener('input', function(e) {
+            similarityThresholdValue.textContent = parseFloat(e.target.value).toFixed(2);
+        });
+
+        // Set example prompt
+        function setPrompt(text) {
+            document.getElementById('promptText').value = text;
+        }
+
+        function renderTopItems(labels) {
+            return labels.slice(0, 5).map((item, index) => (
+                `<div style="font-size:0.9em; margin-bottom:6px;">
+                    #${index + 1}
+                    类别=${escapeHtml(item.category || 'similar_object')},
+                    相似度=<strong>${Number(item.similarity_score ?? 0).toFixed(3)}</strong>,
+                    SAM分数=${Number(item.score ?? 0).toFixed(3)},
+                    组合分=${Number(item.combined_score ?? 0).toFixed(3)},
+                    框=[${(item.bnd_points || []).join(', ')}]
+                </div>`
+            )).join('');
+        }
+
+        function renderSimilarResult(data) {
+            const queryResults = Array.isArray(data.query_results) && data.query_results.length
+                ? data.query_results
+                : [data];
+            const totalMatches = queryResults.reduce((sum, item) => sum + Number(item.num_matches || 0), 0);
+            const totalCandidates = queryResults.reduce((sum, item) => sum + Number(item.num_candidates || 0), 0);
+            const processingTime = typeof data.processing_time_ms === 'number'
+                ? `${(data.processing_time_ms / 1000).toFixed(2)}s`
+                : '-';
+            const promptText = data.prompt || queryResults.find((item) => item.prompt)?.prompt || '';
+            const translatedPromptText = data.translated_prompt || queryResults.find((item) => item.translated_prompt)?.translated_prompt || '';
+
+            resultInfo.innerHTML = `
+                <div class="info-card">
+                    <div class="info-label">待识别图数量</div>
+                    <div class="info-value">${Number(data.batch_size || queryResults.length)} 张</div>
+                </div>
+                <div class="info-card">
+                    <div class="info-label">候选框总数</div>
+                    <div class="info-value">${totalCandidates} 个</div>
+                </div>
+                <div class="info-card">
+                    <div class="info-label">匹配结果总数</div>
+                    <div class="info-value">${totalMatches} 个</div>
+                </div>
+                <div class="info-card">
+                    <div class="info-label">SAM 阈值</div>
+                    <div class="info-value">${Number(data.sam_threshold ?? queryResults[0]?.sam_threshold ?? 0).toFixed(2)}</div>
+                </div>
+                <div class="info-card">
+                    <div class="info-label">相似度阈值</div>
+                    <div class="info-value">${Number(data.similarity_threshold ?? queryResults[0]?.similarity_threshold ?? 0).toFixed(2)}</div>
+                </div>
+                <div class="info-card">
+                    <div class="info-label">样图框来源</div>
+                    <div class="info-value">${data.reference_box_auto_generated ? '自动生成' : '手工输入'}</div>
+                </div>
+                <div class="info-card">
+                    <div class="info-label">文本描述</div>
+                    <div class="info-value">${escapeHtml(promptText || '-')}</div>
+                </div>
+                <div class="info-card">
+                    <div class="info-label">翻译描述</div>
+                    <div class="info-value">${escapeHtml(translatedPromptText || '-')}</div>
+                </div>
+                <div class="info-card">
+                    <div class="info-label">处理时间</div>
+                    <div class="info-value">${processingTime}</div>
+                </div>
+            `;
+
+            if (data.reference_result_image || queryResults[0]?.reference_result_image) {
+                referenceResultImage.style.display = 'block';
+                referenceResultImage.src = `/results/${data.reference_result_image || queryResults[0].reference_result_image}?t=${Date.now()}`;
+            } else {
+                referenceResultImage.style.display = 'none';
+                referenceResultImage.removeAttribute('src');
+            }
+
+            if (queryResults.length === 1 && queryResults[0].result_image) {
+                resultImage.style.display = 'block';
+                resultImage.src = `/results/${queryResults[0].result_image}?t=${Date.now()}`;
+            } else {
+                resultImage.style.display = 'none';
+                resultImage.removeAttribute('src');
+            }
+
+            const debugImages = queryResults.flatMap((item) => Array.isArray(item.concat_prompt_images) ? item.concat_prompt_images : []);
+            if (debugImages.length) {
+                concatDebugSection.style.display = 'block';
+                concatDebugImages.innerHTML = debugImages.map((name, index) => (
+                    `<div class="query-result-card">
+                        <div class="query-result-title">拼接图 #${index + 1}</div>
+                        <img src="/results/${encodeURIComponent(name)}?t=${Date.now()}" class="preview-image" alt="拼接调试图 ${index + 1}">
+                    </div>`
+                )).join('');
+            } else {
+                concatDebugSection.style.display = 'none';
+                concatDebugImages.innerHTML = '';
+            }
+
+            queryResultsList.innerHTML = queryResults.map((item, index) => {
+                const labels = Array.isArray(item.pic_labels) ? item.pic_labels : [];
+                const topItems = renderTopItems(labels);
+                const resultImageHtml = item.result_image
+                    ? `<img src="/results/${item.result_image}?t=${Date.now()}" class="preview-image" alt="比对结果 ${index + 1}">`
+                    : '<div class="hint">暂无可视化结果</div>';
+                return `
+                    <div class="query-result-card">
+                        <div class="query-result-title">#${index + 1} ${escapeHtml(item.query_name || item.pic_id || 'query image')}</div>
+                        <div class="query-result-meta">
+                            候选框 ${Number(item.num_candidates || 0)} 个，
+                            匹配 ${Number(item.num_matches || 0)} 个，
+                            用时 ${typeof item.processing_time_ms === 'number' ? `${(item.processing_time_ms / 1000).toFixed(2)}s` : '-'}
+                        </div>
+                        ${resultImageHtml}
+                        <div class="hint">Top 匹配详情</div>
+                        <div style="margin-top:8px;">${topItems || '暂无匹配结果'}</div>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        similarForm.addEventListener('submit', async function(e) {
+            e.preventDefault();
+
+            const refBoxInput = document.getElementById('referenceBndPoints');
+            if (!refBoxInput.value || !refBoxInput.value.trim()) {
+                error.textContent = '请先填写样图目标框，格式 x,y,w,h';
+                error.classList.add('show');
+                return;
+            }
+
+            const formData = new FormData(similarForm);
+            if (similarModeSelect.value === 'same_image_prompt') {
+                formData.delete('query_file');
+            }
+            loading.classList.add('show');
+            error.classList.remove('show');
+            resultSection.classList.remove('show');
+            similarSubmitBtn.disabled = true;
+
+            try {
+                const response = await fetch('/similar-detect', {
+                    method: 'POST',
+                    body: formData,
+                });
+
+                let data = null;
+                try {
+                    data = await response.json();
+                } catch (_e) {
+                    throw new Error(`服务返回了非 JSON 响应，HTTP ${response.status}`);
+                }
+
+                if (response.ok && data.success) {
+                    renderSimilarResult(data);
+                    resultSection.classList.add('show');
+                } else {
+                    error.textContent = `错误: ${data.detail || '请求失败'}`;
+                    error.classList.add('show');
+                }
+            } catch (err) {
+                error.textContent = `请求失败: ${err.message}`;
+                error.classList.add('show');
+            } finally {
+                loading.classList.remove('show');
+                similarSubmitBtn.disabled = false;
+            }
+        });
+
+        // Handle form submission
+        form.addEventListener('submit', async function(e) {
+            e.preventDefault();
+
+            const formData = new FormData(form);
+
+            // Show loading
+            loading.classList.add('show');
+            error.classList.remove('show');
+            resultSection.classList.remove('show');
+            submitBtn.disabled = true;
+
+            try {
+                const response = await fetch('/detect', {
+                    method: 'POST',
+                    body: formData,
+                });
+
+                let data = null;
+                try {
+                    data = await response.json();
+                } catch (_e) {
+                    throw new Error(`服务返回了非 JSON 响应，HTTP ${response.status}`);
+                }
+
+                if (response.ok && data.success) {
+                    // Build result HTML
+                    let infoCards = '';
+                    const processingTime = data.processing_time
+                        ? data.processing_time
+                        : (typeof data.processing_time_ms === 'number'
+                            ? `${(data.processing_time_ms / 1000).toFixed(2)}s`
+                            : '-');
+                    const originalPrompt = data.original_prompt || data.prompt || '-';
+                    const translatedPrompt = data.translated_prompt || '-';
+                    const detectionKeyword = data.prompt || '-';
+
+                    // Show translation info if translated
+                    if (data.was_translated) {
+                        infoCards += `
+                            <div class="info-card" style="grid-column: 1 / -1; background: #e7f3ff; border-left: 4px solid #2196F3;">
+                                <div class="info-label">🌐 自动翻译</div>
+                                <div style="margin-top: 8px;">
+                                    <div style="font-size: 0.95em; color: #666; margin-bottom: 5px;">原始输入: <strong>${originalPrompt}</strong></div>
+                                    <div style="font-size: 0.95em; color: #666;">英文翻译: <strong>${translatedPrompt}</strong></div>
+                                </div>
+                            </div>
+                        `;
+                    }
+
+                    infoCards += `
+                        <div class="info-card">
+                            <div class="info-label">检测到的目标</div>
+                            <div class="info-value">${data.num_detections} 个</div>
+                        </div>
+                        <div class="info-card">
+                            <div class="info-label">处理时间</div>
+                            <div class="info-value">${processingTime}</div>
+                        </div>
+                        <div class="info-card">
+                            <div class="info-label">搜索关键词</div>
+                            <div class="info-value">${detectionKeyword}</div>
+                        </div>
+                        <div class="info-card">
+                            <div class="info-label">置信度阈值</div>
+                            <div class="info-value">${data.confidence_threshold.toFixed(2)}</div>
+                        </div>
+                    `;
+
+                    resultInfo.innerHTML = infoCards;
+                    if (data.result_image) {
+                        resultImage.style.display = 'block';
+                        resultImage.src = `/results/${data.result_image}?t=${Date.now()}`;
+                    } else {
+                        resultImage.style.display = 'none';
+                        resultImage.removeAttribute('src');
+                    }
+                    referenceResultImage.style.display = 'none';
+                    referenceResultImage.removeAttribute('src');
+                    queryResultsList.innerHTML = '';
+                    concatDebugSection.style.display = 'none';
+                    concatDebugImages.innerHTML = '';
+                    resultSection.classList.add('show');
+                } else {
+                    error.textContent = `错误: ${data.detail || '请求失败'}`;
+                    error.classList.add('show');
+                }
+            } catch (err) {
+                error.textContent = `请求失败: ${err.message}`;
+                error.classList.add('show');
+            } finally {
+                loading.classList.remove('show');
+                submitBtn.disabled = false;
+            }
+        });
+
+        plainKeysMap = loadPlainKeysMap();
+        loadApiKeys().catch((err) => {
+            keysList.innerHTML = `<div class="key-item"><div class="key-meta">加载 Key 列表失败: ${escapeHtml(err.message)}</div></div>`;
+        });
+    </script>
+</body>
+</html>

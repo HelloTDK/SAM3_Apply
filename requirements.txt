@@ -1,0 +1,15 @@
+# SAM3 Web API 依赖
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+python-multipart==0.0.6
+pillow==10.1.0
+matplotlib==3.8.2
+numpy==1.26.2
+torch>=2.0.0
+opencv-python-headless>=4.8.0
+iopath>=0.1.10
+ultralytics>=8.4.51
+openai-clip>=1.0.1
+
+# 翻译依赖
+argostranslate>=1.9.0

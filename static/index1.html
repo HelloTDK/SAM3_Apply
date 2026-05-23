@@ -1,0 +1,138 @@
+    <!DOCTYPE html>
+    <html>
+        <head>
+            <title>文件上传 + 文本输入</title>
+            <style>
+                body {
+                    font-family: Arial, sans-serif;
+                    max-width: 600px;
+                    margin: 50px auto;
+                    padding: 20px;
+                    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                }
+                .container {
+                    background: white;
+                    padding: 30px;
+                    border-radius: 10px;
+                    box-shadow: 0 10px 30px rgba(0,0,0,0.3);
+                }
+                h1 { color: #667eea; text-align: center; }
+                input, button {
+                    width: 100%;
+                    margin: 10px 0;
+                    padding: 12px;
+                    border: 2px solid #e0e0e0;
+                    border-radius: 5px;
+                    box-sizing: border-box;
+                }
+                button {
+                    background: #4CAF50;
+                    color: white;
+                    border: none;
+                    cursor: pointer;
+                    font-size: 16px;
+                    font-weight: bold;
+                }
+                button:hover { background: #45a049; }
+                .example-prompts {
+                    display: flex;
+                    gap: 5px;
+                    flex-wrap: wrap;
+                    margin: 10px 0;
+                }
+                .example-btn {
+                    width: auto;
+                    padding: 5px 10px;
+                    background: #e0e7ff;
+                    color: #667eea;
+                    border: none;
+                    border-radius: 15px;
+                    cursor: pointer;
+                    font-size: 12px;
+                }
+                .example-btn:hover {
+                    background: #667eea;
+                    color: white;
+                }
+                #result {
+                    margin-top: 20px;
+                    padding: 15px;
+                    background: #f0f0f0;
+                    border-radius: 5px;
+                    display: none;
+                }
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <h1>🎯 目标检测测试</h1>
+                <form id="uploadForm">
+                    <p><label><strong>📷 选择图片:</strong></label></p>
+                    <input type="file" id="fileInput" name="file" accept="image/*" required>
+
+                    <p><label><strong>🔍 检测目标:</strong></label></p>
+                    <input type="text" id="promptInput" name="prompt"
+                           placeholder="例如: person, car, cat, dog" required>
+
+                    <div class="example-prompts">
+                        <button type="button" class="example-btn" onclick="setPrompt('person')">person</button>
+                        <button type="button" class="example-btn" onclick="setPrompt('car')">car</button>
+                        <button type="button" class="example-btn" onclick="setPrompt('cat')">cat</button>
+                        <button type="button" class="example-btn" onclick="setPrompt('dog')">dog</button>
+                        <button type="button" class="example-btn" onclick="setPrompt('car plate')">car plate</button>
+                    </div>
+
+                    <p><button type="submit">🚀 开始检测</button></p>
+                </form>
+
+                <div id="result"></div>
+            </div>
+
+            <script>
+                function setPrompt(text) {
+                    document.getElementById('promptInput').value = text;
+                }
+
+                document.getElementById('uploadForm').addEventListener('submit', async (e) => {
+                    e.preventDefault();
+
+                    const formData = new FormData();
+                    formData.append('file', document.getElementById('fileInput').files[0]);
+                    formData.append('prompt', document.getElementById('promptInput').value);
+
+                    const resultDiv = document.getElementById('result');
+                    resultDiv.textContent = '⏳ 正在处理，请稍候...';
+                    resultDiv.style.display = 'block';
+
+                    try {
+                        const response = await fetch('/detect', {
+                            method: 'POST',
+                            body: formData
+                        });
+
+                        const data = await response.json();
+
+                        if (data.success) {
+                            resultDiv.innerHTML = `
+                                <h3>✅ 处理成功</h3>
+                                <p><strong>文件名:</strong> ${data.filename}</p>
+                                <p><strong>检测目标:</strong> ${data.prompt}</p>
+                                <p><strong>消息:</strong> ${data.message}</p>
+                                
+                            `;
+                        } else {
+                            resultDiv.innerHTML = `
+                                <h3>❌ 处理失败</h3>
+                                <p>${data.detail}</p>
+                            `;
+                        }
+                    } catch (error) {
+                        resultDiv.innerHTML = `
+                            <h3>❌ 请求失败</h3>
+                            <p>${error.message}</p>
+                        `;
+                    }
+                });
+            </script>
+        </body>
+    </html>
