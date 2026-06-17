@@ -4,6 +4,39 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
 
+activate_sam3_env() {
+  local env_name="${SAM3_CONDA_ENV:-sam3}"
+  local conda_sh=""
+
+  if command -v conda >/dev/null 2>&1; then
+    local conda_base
+    conda_base="$(conda info --base 2>/dev/null || true)"
+    if [ -n "${conda_base}" ] && [ -f "${conda_base}/etc/profile.d/conda.sh" ]; then
+      conda_sh="${conda_base}/etc/profile.d/conda.sh"
+    fi
+  fi
+
+  if [ -z "${conda_sh}" ] && [ -f "/expdata/miniconda/etc/profile.d/conda.sh" ]; then
+    conda_sh="/expdata/miniconda/etc/profile.d/conda.sh"
+  elif [ -z "${conda_sh}" ] && [ -f "/root/miniconda3/etc/profile.d/conda.sh" ]; then
+    conda_sh="/root/miniconda3/etc/profile.d/conda.sh"
+  elif [ -z "${conda_sh}" ] && [ -f "/opt/conda/etc/profile.d/conda.sh" ]; then
+    conda_sh="/opt/conda/etc/profile.d/conda.sh"
+  fi
+
+  if [ -z "${conda_sh}" ]; then
+    echo "ERROR: conda.sh not found. Set SAM3_CONDA_ENV or install conda."
+    exit 1
+  fi
+
+  # shellcheck source=/dev/null
+  source "${conda_sh}"
+  echo "Activating conda env: ${env_name}"
+  conda activate "${env_name}"
+}
+
+activate_sam3_env
+
 mkdir -p uploads results static
 export PYTHONPATH="${SCRIPT_DIR}/_vendor${PYTHONPATH:+:${PYTHONPATH}}"
 export MPLCONFIGDIR="${MPLCONFIGDIR:-${SCRIPT_DIR}/.matplotlib}"
@@ -64,6 +97,9 @@ export SAM3_INFER_DTYPE="${SAM3_INFER_DTYPE:-bfloat16}"
 export SAM3_ENABLE_AUTOCAST="${SAM3_ENABLE_AUTOCAST:-1}"
 export SAM3_ULTRALYTICS_IMGSZ="${SAM3_ULTRALYTICS_IMGSZ:-1036}"
 export SAM3_ULTRALYTICS_IOU="${SAM3_ULTRALYTICS_IOU:-0.7}"
+export SAM3_CUDA_CLEANUP_AFTER_REQUEST="${SAM3_CUDA_CLEANUP_AFTER_REQUEST:-1}"
+export SAM3_IDLE_MODEL_UNLOAD_SECONDS="${SAM3_IDLE_MODEL_UNLOAD_SECONDS:-0}"
+export SAM3_CUDA_CLEANUP_LOG="${SAM3_CUDA_CLEANUP_LOG:-0}"
 
 echo "Starting Ultralytics SAM3 offline service..."
 echo "HOST=${SAM3_HOST} PORT=${SAM3_PORT}"
@@ -75,5 +111,47 @@ echo "INFER_DTYPE=${SAM3_INFER_DTYPE}"
 echo "ENABLE_AUTOCAST=${SAM3_ENABLE_AUTOCAST}"
 echo "ULTRALYTICS_IMGSZ=${SAM3_ULTRALYTICS_IMGSZ}"
 echo "ULTRALYTICS_IOU=${SAM3_ULTRALYTICS_IOU}"
+echo "CUDA_CLEANUP_AFTER_REQUEST=${SAM3_CUDA_CLEANUP_AFTER_REQUEST}"
+echo "IDLE_MODEL_UNLOAD_SECONDS=${SAM3_IDLE_MODEL_UNLOAD_SECONDS}"
+echo "CUDA_CLEANUP_LOG=${SAM3_CUDA_CLEANUP_LOG}"
 
-exec python sam_app.py
+export SAM3_PID_FILE="${SAM3_PID_FILE:-${SCRIPT_DIR}/sam3_offline.pid}"
+export SAM3_LOG_FILE="${SAM3_LOG_FILE:-${SCRIPT_DIR}/start_offline.log}"
+export SAM3_FOREGROUND="${SAM3_FOREGROUND:-0}"
+
+if [ "${SAM3_FOREGROUND}" = "1" ]; then
+  echo "Running in foreground mode."
+  exec python sam_app.py
+fi
+
+if [ -f "${SAM3_PID_FILE}" ]; then
+  old_pid="$(cat "${SAM3_PID_FILE}" 2>/dev/null || true)"
+  if [ -n "${old_pid}" ] && kill -0 "${old_pid}" 2>/dev/null; then
+    echo "SAM3 offline service is already running."
+    echo "PID=${old_pid}"
+    echo "PID_FILE=${SAM3_PID_FILE}"
+    echo "LOG_FILE=${SAM3_LOG_FILE}"
+    exit 0
+  fi
+  rm -f "${SAM3_PID_FILE}"
+fi
+
+echo "Running in background mode."
+echo "PID_FILE=${SAM3_PID_FILE}"
+echo "LOG_FILE=${SAM3_LOG_FILE}"
+printf '\n[%s] Starting SAM3 offline service\n' "$(date '+%Y-%m-%d %H:%M:%S')" >> "${SAM3_LOG_FILE}"
+nohup python sam_app.py >> "${SAM3_LOG_FILE}" 2>&1 &
+new_pid="$!"
+echo "${new_pid}" > "${SAM3_PID_FILE}"
+
+sleep 1
+if ! kill -0 "${new_pid}" 2>/dev/null; then
+  echo "ERROR: SAM3 offline service failed to start. Last log lines:"
+  tail -n 80 "${SAM3_LOG_FILE}" || true
+  rm -f "${SAM3_PID_FILE}"
+  exit 1
+fi
+
+echo "SAM3 offline service started."
+echo "PID=${new_pid}"
+echo "URL=http://${SAM3_HOST}:${SAM3_PORT}"

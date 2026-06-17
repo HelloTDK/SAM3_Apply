@@ -2,6 +2,7 @@ import asyncio
 import base64
 import binascii
 import contextlib
+import gc
 import hashlib
 import html
 import io
@@ -81,6 +82,14 @@ EMPTY_CUDA_CACHE_EACH_REQUEST = os.getenv("SAM3_EMPTY_CUDA_CACHE_EACH_REQUEST", 
     "yes",
     "on",
 }
+CUDA_CLEANUP_AFTER_REQUEST = os.getenv("SAM3_CUDA_CLEANUP_AFTER_REQUEST", "1").lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+IDLE_MODEL_UNLOAD_SECONDS = int(os.getenv("SAM3_IDLE_MODEL_UNLOAD_SECONDS", "0"))
+CUDA_CLEANUP_LOG = os.getenv("SAM3_CUDA_CLEANUP_LOG", "0").lower() in {"1", "true", "yes", "on"}
 INFER_DTYPE_STR = (os.getenv("SAM3_INFER_DTYPE", "bfloat16") or "bfloat16").strip().lower()
 ENABLE_AUTOCAST = os.getenv("SAM3_ENABLE_AUTOCAST", "1").lower() in {"1", "true", "yes", "on"}
 ULTRALYTICS_IMGSZ = int(os.getenv("SAM3_ULTRALYTICS_IMGSZ", "1036"))
@@ -102,6 +111,7 @@ CONCAT_PROMPT_SCALES = [
 CONCAT_PROMPT_PADDING = max(0, int(os.getenv("SAM3_CONCAT_PROMPT_PADDING", "16")))
 CONCAT_PROMPT_SEPARATOR = max(0, int(os.getenv("SAM3_CONCAT_PROMPT_SEPARATOR", "16")))
 SIMILAR_MODES = {"feature_match", "concat_prompt", "same_image_prompt"}
+MULTI_NEGATIVE_FILTER_IOU = float(os.getenv("SAM3_MULTI_NEGATIVE_FILTER_IOU", "0.5"))
 
 
 def _infer_model_label(checkpoint_path: Path) -> str:
@@ -271,6 +281,8 @@ predictor = SAM3SemanticPredictor(
 predictor.setup_model()
 
 print("Model loaded successfully")
+print(f"CUDA cleanup after request: {CUDA_CLEANUP_AFTER_REQUEST}")
+print(f"Idle model unload seconds: {IDLE_MODEL_UNLOAD_SECONDS}")
 
 translation_available = False
 ARGOS_SOURCE_CODE = (os.getenv("SAM3_ARGOS_SOURCE_CODE", "zh") or "zh").strip()
@@ -1217,7 +1229,7 @@ def extract_ultralytics_arrays(result: Any) -> Dict[str, np.ndarray]:
     }
 
 
-def set_ultralytics_image_and_features(image: Image.Image) -> torch.Tensor:
+def set_ultralytics_image_features(image: Image.Image) -> Dict[str, Any]:
     predictor.set_image(pil_to_bgr_numpy(image))
     features = predictor.features
     if not isinstance(features, dict):
@@ -1228,7 +1240,83 @@ def set_ultralytics_image_and_features(image: Image.Image) -> torch.Tensor:
     feature_map = backbone_fpn[-1]
     if not torch.is_tensor(feature_map) or feature_map.ndim != 4 or feature_map.shape[0] < 1:
         raise ValueError("Unexpected Ultralytics SAM3 feature map shape")
+    return features
+
+
+def set_ultralytics_image_and_features(image: Image.Image) -> torch.Tensor:
+    features = set_ultralytics_image_features(image)
+    backbone_fpn = features["backbone_fpn"]
+    feature_map = backbone_fpn[-1]
     return feature_map[0].float()
+
+
+def extract_ultralytics_feature_arrays(
+    masks: Optional[torch.Tensor],
+    boxes: Optional[torch.Tensor],
+) -> Dict[str, np.ndarray]:
+    empty_masks = np.zeros((0, 0, 0), dtype=bool)
+    empty_boxes = np.zeros((0, 4), dtype=np.float32)
+    empty_scores = np.zeros((0,), dtype=np.float32)
+    empty_classes = np.zeros((0,), dtype=np.int64)
+
+    if masks is None or boxes is None:
+        return {
+            "masks": empty_masks,
+            "boxes": empty_boxes,
+            "scores": empty_scores,
+            "classes": empty_classes,
+        }
+
+    masks_np = to_numpy(masks)
+    boxes_np = to_numpy(boxes)
+
+    if masks_np.ndim == 2:
+        masks_np = masks_np[None, ...]
+    if boxes_np.ndim == 1 and boxes_np.size >= 6:
+        boxes_np = boxes_np[None, ...]
+    if boxes_np.ndim != 2 or boxes_np.shape[1] < 6:
+        return {
+            "masks": empty_masks,
+            "boxes": empty_boxes,
+            "scores": empty_scores,
+            "classes": empty_classes,
+        }
+
+    return {
+        "masks": masks_np,
+        "boxes": boxes_np[:, :4],
+        "scores": boxes_np[:, 4],
+        "classes": boxes_np[:, 5].astype(np.int64),
+    }
+
+
+def run_ultralytics_cached_feature_prediction(
+    image: Image.Image,
+    *,
+    text: Optional[List[str]] = None,
+    confidence_threshold: float = 0.3,
+) -> Dict[str, np.ndarray]:
+    features = predictor.features
+    if not isinstance(features, dict):
+        raise ValueError("Ultralytics SAM3 cached image features are not available")
+
+    predictor.args.conf = confidence_threshold
+    predictor.args.iou = ULTRALYTICS_IOU
+    if hasattr(predictor, "inference_features"):
+        masks, boxes = predictor.inference_features(
+            dict(features),
+            (image.height, image.width),
+            text=text,
+        )
+        return extract_ultralytics_feature_arrays(masks, boxes)
+
+    result = run_ultralytics_prediction(
+        image,
+        text=text,
+        confidence_threshold=confidence_threshold,
+        reset_cached_image=False,
+    )
+    return extract_ultralytics_arrays(result)
 
 
 def _extract_feature_vector_from_box(
@@ -1391,6 +1479,125 @@ def _propose_candidate_boxes_from_similarity(
 
 MODEL_LOCK = threading.Lock()
 INFERENCE_SEMAPHORE = asyncio.Semaphore(MAX_CONCURRENT_INFERENCES)
+INFERENCE_STATE_LOCK = threading.Lock()
+ACTIVE_INFERENCE_COUNT = 0
+LAST_INFERENCE_FINISHED_AT = 0.0
+IDLE_MODEL_UNLOADED = False
+
+
+def get_cuda_memory_stats() -> Optional[Dict[str, int]]:
+    if not torch.cuda.is_available() or "cuda" not in device:
+        return None
+
+    device_index = torch.device(device).index
+    if device_index is None:
+        device_index = torch.cuda.current_device()
+    return {
+        "device_index": int(device_index),
+        "allocated_mb": int(torch.cuda.memory_allocated(device_index) / 1024 / 1024),
+        "reserved_mb": int(torch.cuda.memory_reserved(device_index) / 1024 / 1024),
+        "max_allocated_mb": int(torch.cuda.max_memory_allocated(device_index) / 1024 / 1024),
+        "max_reserved_mb": int(torch.cuda.max_memory_reserved(device_index) / 1024 / 1024),
+    }
+
+
+def _reset_predictor_runtime_state() -> None:
+    if hasattr(predictor, "reset_image"):
+        predictor.reset_image()
+
+    for attr_name in (
+        "results",
+        "batch",
+        "dataset",
+        "source_type",
+        "plotted_img",
+        "transforms",
+    ):
+        if hasattr(predictor, attr_name):
+            setattr(predictor, attr_name, None)
+
+    vid_writer = getattr(predictor, "vid_writer", None)
+    if isinstance(vid_writer, dict):
+        for writer in list(vid_writer.values()):
+            if hasattr(writer, "release"):
+                with contextlib.suppress(Exception):
+                    writer.release()
+        predictor.vid_writer = {}
+
+
+def cleanup_cuda_runtime_state(*, unload_model: bool = False, reason: str = "request") -> None:
+    if not torch.cuda.is_available() or "cuda" not in device:
+        return
+
+    global IDLE_MODEL_UNLOADED
+    with INFERENCE_STATE_LOCK:
+        if ACTIVE_INFERENCE_COUNT > 0:
+            return
+
+    before = get_cuda_memory_stats() if CUDA_CLEANUP_LOG else None
+    with MODEL_LOCK:
+        _reset_predictor_runtime_state()
+
+        if unload_model and getattr(predictor, "model", None) is not None:
+            with contextlib.suppress(Exception):
+                predictor.model.to("cpu")
+            predictor.model = None
+            predictor.mean = None
+            predictor.std = None
+            predictor.done_warmup = False
+            IDLE_MODEL_UNLOADED = True
+
+    gc.collect()
+    torch.cuda.empty_cache()
+    with contextlib.suppress(Exception):
+        torch.cuda.ipc_collect()
+
+    if CUDA_CLEANUP_LOG:
+        after = get_cuda_memory_stats()
+        print(f"CUDA cleanup ({reason}): before={before} after={after} unload_model={unload_model}")
+
+
+async def run_inference_in_thread(func: Any, *args: Any) -> Any:
+    global ACTIVE_INFERENCE_COUNT, LAST_INFERENCE_FINISHED_AT, IDLE_MODEL_UNLOADED
+    with INFERENCE_STATE_LOCK:
+        ACTIVE_INFERENCE_COUNT += 1
+        IDLE_MODEL_UNLOADED = False
+
+    try:
+        return await asyncio.to_thread(func, *args)
+    finally:
+        should_cleanup = False
+        with INFERENCE_STATE_LOCK:
+            ACTIVE_INFERENCE_COUNT = max(0, ACTIVE_INFERENCE_COUNT - 1)
+            if ACTIVE_INFERENCE_COUNT == 0:
+                LAST_INFERENCE_FINISHED_AT = time.monotonic()
+                should_cleanup = CUDA_CLEANUP_AFTER_REQUEST or EMPTY_CUDA_CACHE_EACH_REQUEST
+
+        if should_cleanup:
+            await asyncio.to_thread(cleanup_cuda_runtime_state, reason="request")
+
+
+def _idle_model_unload_worker() -> None:
+    if IDLE_MODEL_UNLOAD_SECONDS <= 0:
+        return
+
+    while True:
+        time.sleep(min(max(IDLE_MODEL_UNLOAD_SECONDS // 2, 5), 60))
+        with INFERENCE_STATE_LOCK:
+            active_count = ACTIVE_INFERENCE_COUNT
+            last_finished_at = LAST_INFERENCE_FINISHED_AT
+            already_unloaded = IDLE_MODEL_UNLOADED
+
+        if active_count > 0 or already_unloaded or last_finished_at <= 0:
+            continue
+
+        idle_seconds = time.monotonic() - last_finished_at
+        if idle_seconds >= IDLE_MODEL_UNLOAD_SECONDS:
+            cleanup_cuda_runtime_state(unload_model=True, reason=f"idle_{int(idle_seconds)}s")
+
+
+if IDLE_MODEL_UNLOAD_SECONDS > 0:
+    threading.Thread(target=_idle_model_unload_worker, name="sam3-idle-model-unload", daemon=True).start()
 
 
 def run_detection_pipeline(
@@ -1408,7 +1615,7 @@ def run_detection_pipeline(
     if not original_classes:
         raise ValueError("Prompt is empty after parsing. Use ';' or ',' to separate classes.")
 
-    classes_info: List[Dict[str, str]] = []
+    classes_info: List[Dict[str, Any]] = []
     translated_classes: List[str] = []
     for one_class in original_classes:
         translated = translate_to_english(one_class)
@@ -1432,45 +1639,55 @@ def run_detection_pipeline(
         class_info["color"] = build_class_color(index)
 
     pic_labels: List[Dict[str, Any]] = []
+    visualization_groups: Dict[int, Dict[str, Any]] = {}
 
     lock_ctx = MODEL_LOCK if SERIALIZE_MODEL_ACCESS else contextlib.nullcontext()
     autocast_ctx = _inference_autocast_context()
     with torch.inference_mode(), lock_ctx, autocast_ctx:
-        result = run_ultralytics_prediction(
-            image,
-            text=translated_classes,
-            confidence_threshold=confidence_threshold,
-        )
-        arrays = extract_ultralytics_arrays(result)
+        set_ultralytics_image_features(image)
 
-    masks_np = arrays["masks"]
-    boxes_np = arrays["boxes"]
-    scores_np = arrays["scores"]
-    classes_np = arrays["classes"]
+        for class_index, class_info in enumerate(classes_info):
+            arrays = run_ultralytics_cached_feature_prediction(
+                image,
+                text=[class_info["class_name"]],
+                confidence_threshold=confidence_threshold,
+            )
+            masks_np = arrays["masks"]
+            boxes_np = arrays["boxes"]
+            scores_np = arrays["scores"]
 
-    for mask, box, score, class_index in zip(masks_np, boxes_np, scores_np, classes_np):
-        if float(score) < confidence_threshold:
-            continue
+            for mask, box, score in zip(masks_np, boxes_np, scores_np):
+                if float(score) < confidence_threshold:
+                    continue
 
-        class_index = int(class_index)
-        if class_index < 0 or class_index >= len(classes_info):
-            continue
+                bnd_points = bbox_to_xywh(box)
+                polygons = mask_to_polygons(mask, epsilon=polygon_simplify_epsilon)
+                polygon_points = polygons[0]["points"] if polygons else bbox_xywh_to_polygon_points(bnd_points)
 
-        class_info = classes_info[class_index]
-        bnd_points = bbox_to_xywh(box)
-        polygons = mask_to_polygons(mask, epsilon=polygon_simplify_epsilon)
-        polygon_points = polygons[0]["points"] if polygons else bbox_xywh_to_polygon_points(bnd_points)
-
-        pic_labels.append(
-            {
-                "category": class_info["original_class_name"],
-                "translated_category": class_info["class_name"],
-                "score": round(float(score), 6),
-                "bnd_points": bnd_points,
-                "polygon_points": polygon_points,
-                "mask_area": int(np.count_nonzero(np.asarray(mask) > 0.5)),
-            }
-        )
+                pic_labels.append(
+                    {
+                        "category": class_info["original_class_name"],
+                        "translated_category": class_info["class_name"],
+                        "score": round(float(score), 6),
+                        "bnd_points": bnd_points,
+                        "polygon_points": polygon_points,
+                        "mask_area": int(np.count_nonzero(np.asarray(mask) > 0.5)),
+                    }
+                )
+                visualization_group = visualization_groups.setdefault(
+                    class_index,
+                    {
+                        "class_name": class_info["class_name"],
+                        "original_class_name": class_info["original_class_name"],
+                        "masks": [],
+                        "boxes": [],
+                        "scores": [],
+                        "color": class_info["color"],
+                    },
+                )
+                visualization_group["masks"].append(np.asarray(mask, dtype=np.float32))
+                visualization_group["boxes"].append(np.asarray(box, dtype=np.float32))
+                visualization_group["scores"].append(float(score))
 
     if EMPTY_CUDA_CACHE_EACH_REQUEST and torch.cuda.is_available():
         torch.cuda.empty_cache()
@@ -1481,6 +1698,21 @@ def run_detection_pipeline(
         detection_details[category] = detection_details.get(category, 0) + 1
 
     processing_time_ms = int((time.perf_counter() - start_time) * 1000)
+    detection_for_viz: List[Dict[str, Any]] = []
+    for one_group in visualization_groups.values():
+        if not one_group["masks"]:
+            continue
+        detection_for_viz.append(
+            {
+                "class_name": one_group["class_name"],
+                "original_class_name": one_group["original_class_name"],
+                "masks": np.asarray(one_group["masks"]),
+                "boxes": np.asarray(one_group["boxes"]),
+                "scores": np.asarray(one_group["scores"]),
+                "color": one_group["color"],
+            }
+        )
+    result_image = visualize_results(image, detection_for_viz) if detection_for_viz else None
 
     response: Dict[str, Any] = {
         "model": MODEL_LABEL,
@@ -1494,6 +1726,7 @@ def run_detection_pipeline(
         "translated_prompt": translated_prompt if was_translated else None,
         "was_translated": was_translated,
         "confidence_threshold": confidence_threshold,
+        "result_image": result_image,
         "created": int(time.time()),
         "processing_time_ms": processing_time_ms,
     }
@@ -1720,6 +1953,315 @@ def _prepare_similar_reference_context(
     }
 
 
+def _build_sam3_geometric_prompt_from_boxes(
+    boxes_xywh: List[List[float]],
+    image_width: int,
+    image_height: int,
+) -> Any:
+    """Build a SAM3 geometric prompt from one or more xywh boxes in image pixels."""
+    xyxy_boxes = [
+        bbox_xywh_to_xyxy(clip_bnd_points_to_image(one_box, image_width, image_height))
+        for one_box in boxes_xywh
+    ]
+    bboxes, labels = predictor._prepare_geometric_prompts((image_height, image_width), xyxy_boxes, None)
+    geometric_prompt = predictor._get_dummy_prompt(num_prompts=1)
+    if bboxes is not None:
+        for index in range(len(bboxes)):
+            geometric_prompt.append_boxes(bboxes[[index]], labels[[index]])
+    return geometric_prompt
+
+
+def _build_sam3_geometric_prompt_from_box(box_xywh: List[float], image_width: int, image_height: int) -> Any:
+    """Build a single SAM3 geometric prompt from one xywh box in image pixels."""
+    return _build_sam3_geometric_prompt_from_boxes([box_xywh], image_width, image_height)
+
+
+def _prepare_sam3_backbone_features(backbone_out: Dict[str, Any], batch: int = 1) -> Tuple[Dict[str, Any], List[torch.Tensor], List[torch.Tensor], List[Tuple[int, int]]]:
+    """Flatten SAM3 backbone features the same way Ultralytics SAM internals do."""
+    if batch > 1:
+        backbone_out = {
+            **backbone_out,
+            "backbone_fpn": [feat.expand(batch, -1, -1, -1) for feat in backbone_out["backbone_fpn"]],
+            "vision_pos_enc": [pos.expand(batch, -1, -1, -1) for pos in backbone_out["vision_pos_enc"]],
+        }
+
+    assert len(backbone_out["backbone_fpn"]) == len(backbone_out["vision_pos_enc"])
+    assert len(backbone_out["backbone_fpn"]) >= predictor.model.num_feature_levels
+
+    feature_maps = backbone_out["backbone_fpn"][-predictor.model.num_feature_levels :]
+    vision_pos_embeds = backbone_out["vision_pos_enc"][-predictor.model.num_feature_levels :]
+    feat_sizes = [(x.shape[-2], x.shape[-1]) for x in vision_pos_embeds]
+    vision_feats = [x.flatten(2).permute(2, 0, 1) for x in feature_maps]
+    vision_pos_embeds = [x.flatten(2).permute(2, 0, 1) for x in vision_pos_embeds]
+    return backbone_out, vision_feats, vision_pos_embeds, feat_sizes
+
+
+def _extract_sam3_semantic_arrays_from_raw_outputs(
+    raw_outputs: Dict[str, Any],
+    image_height: int,
+    image_width: int,
+    confidence_threshold: float,
+) -> Tuple[Dict[str, np.ndarray], int, int]:
+    """Postprocess raw SAM3 semantic grounding outputs into mask/box/score arrays."""
+    import torchvision
+
+    pred_boxes = raw_outputs["pred_boxes"]
+    pred_logits = raw_outputs["pred_logits"]
+    pred_masks = raw_outputs["pred_masks"]
+    pred_scores = pred_logits.sigmoid()
+    presence_logits = raw_outputs.get("presence_logit_dec")
+    if presence_logits is not None:
+        pred_scores = pred_scores * presence_logits.sigmoid().unsqueeze(1)
+    pred_scores = pred_scores.squeeze(-1)
+    raw_candidate_count = int(pred_scores.numel())
+
+    pred_cls = torch.arange(
+        pred_scores.shape[0],
+        dtype=pred_scores.dtype,
+        device=pred_scores.device,
+    )[:, None].expand_as(pred_scores)
+    pred_boxes = torch.cat([pred_boxes, pred_scores[..., None], pred_cls[..., None]], dim=-1)
+
+    keep = pred_scores > confidence_threshold
+    pred_masks = pred_masks[keep]
+    pred_boxes = pred_boxes[keep]
+    if pred_boxes.numel() == 0 or pred_masks.numel() == 0:
+        empty_masks = np.zeros((0, 0, 0), dtype=bool)
+        empty_boxes = np.zeros((0, 4), dtype=np.float32)
+        empty_scores = np.zeros((0,), dtype=np.float32)
+        empty_classes = np.zeros((0,), dtype=np.int64)
+        return (
+            {
+                "masks": empty_masks,
+                "boxes": empty_boxes,
+                "scores": empty_scores,
+                "classes": empty_classes,
+            },
+            raw_candidate_count,
+            0,
+        )
+
+    pred_boxes = pred_boxes.clone()
+    xywh = pred_boxes[:, :4]
+    cx, cy, w, h = xywh.unbind(-1)
+    pred_boxes[:, 0] = cx - w / 2.0
+    pred_boxes[:, 1] = cy - h / 2.0
+    pred_boxes[:, 2] = cx + w / 2.0
+    pred_boxes[:, 3] = cy + h / 2.0
+
+    class_offsets = pred_boxes[:, 5:6] * (0 if predictor.args.agnostic_nms else 7680)
+    keep = torchvision.ops.nms(pred_boxes[:, :4] + class_offsets, pred_boxes[:, 4], predictor.args.iou)
+    pred_boxes = pred_boxes[keep]
+    pred_masks = pred_masks[keep]
+    kept_candidate_count = int(pred_boxes.shape[0])
+
+    pred_masks = F.interpolate(
+        pred_masks.float()[None],
+        (image_height, image_width),
+        mode="bilinear",
+        align_corners=False,
+    )[0] > 0.5
+    pred_boxes[:, [0, 2]] *= float(image_width)
+    pred_boxes[:, [1, 3]] *= float(image_height)
+
+    return (
+        {
+            "masks": to_numpy(pred_masks),
+            "boxes": to_numpy(pred_boxes[:, :4]),
+            "scores": to_numpy(pred_boxes[:, 4]),
+            "classes": to_numpy(pred_boxes[:, 5]).astype(np.int64),
+        },
+        raw_candidate_count,
+        kept_candidate_count,
+    )
+
+
+def _run_ultralytics_cross_image_visual_prompt_prediction(
+    reference_image: Image.Image,
+    reference_bnd_points: List[float],
+    query_image: Image.Image,
+    text_prompt: Optional[List[str]] = None,
+    confidence_threshold: float = 0.0,
+) -> Tuple[Dict[str, np.ndarray], Dict[str, int]]:
+    """Run SAM3 native cross-image visual prompting using reference-box prompt embeddings."""
+    reference_image = reference_image.convert("RGB")
+    query_image = query_image.convert("RGB")
+
+    reference_encode_start = time.perf_counter()
+    reference_features = set_ultralytics_image_features(reference_image)
+    _, reference_img_feats, reference_img_pos_embeds, reference_feat_sizes = _prepare_sam3_backbone_features(
+        reference_features,
+        batch=1,
+    )
+    reference_prompt = _build_sam3_geometric_prompt_from_box(
+        reference_bnd_points,
+        reference_image.width,
+        reference_image.height,
+    )
+    reference_visual_prompt_embed, reference_visual_prompt_mask = predictor.model._encode_prompt(
+        reference_img_feats,
+        reference_img_pos_embeds,
+        reference_feat_sizes,
+        reference_prompt,
+    )
+    reference_prompt_encode_ms = int((time.perf_counter() - reference_encode_start) * 1000)
+
+    set_query_start = time.perf_counter()
+    query_features = set_ultralytics_image_features(query_image)
+    query_feature_map = query_features["backbone_fpn"][-1][0].float()
+    set_query_ms = int((time.perf_counter() - set_query_start) * 1000)
+
+    prompt_batch = text_prompt if text_prompt is not None else ["visual"]
+    if predictor.model.names != prompt_batch:
+        predictor.model.set_classes(text=prompt_batch)
+
+    grounding_start = time.perf_counter()
+    text_ids = torch.arange(len(prompt_batch), device=predictor.device, dtype=torch.long)
+    query_backbone_out, query_img_feats, query_img_pos_embeds, query_feat_sizes = _prepare_sam3_backbone_features(
+        query_features,
+        batch=len(prompt_batch),
+    )
+    query_backbone_out.update({key: value for key, value in predictor.model.text_embeddings.items()})
+    text_features = query_backbone_out["language_features"][:, text_ids]
+    text_masks = query_backbone_out["language_mask"][text_ids]
+    prompt_embed = torch.cat([text_features, reference_visual_prompt_embed], dim=0)
+    prompt_mask = torch.cat([text_masks, reference_visual_prompt_mask], dim=1)
+
+    encoder_out = predictor.model._run_encoder(
+        query_img_feats,
+        query_img_pos_embeds,
+        query_feat_sizes,
+        prompt_embed,
+        prompt_mask,
+    )
+    raw_outputs: Dict[str, Any] = {"backbone_out": query_backbone_out}
+    raw_outputs, hs = predictor.model._run_decoder(
+        memory=encoder_out["encoder_hidden_states"],
+        pos_embed=encoder_out["pos_embed"],
+        src_mask=encoder_out["padding_mask"],
+        out=raw_outputs,
+        prompt=prompt_embed,
+        prompt_mask=prompt_mask,
+        encoder_out=encoder_out,
+    )
+    predictor.model._run_segmentation_heads(
+        out=raw_outputs,
+        backbone_out=query_backbone_out,
+        encoder_hidden_states=encoder_out["encoder_hidden_states"],
+        prompt=prompt_embed,
+        prompt_mask=prompt_mask,
+        hs=hs,
+    )
+    grounding_forward_ms = int((time.perf_counter() - grounding_start) * 1000)
+
+    arrays, raw_candidate_count, kept_candidate_count = _extract_sam3_semantic_arrays_from_raw_outputs(
+        raw_outputs,
+        query_image.height,
+        query_image.width,
+        confidence_threshold,
+    )
+    return arrays, {
+        "reference_prompt_encode_ms": reference_prompt_encode_ms,
+        "set_query_ms": set_query_ms,
+        "grounding_forward_ms": grounding_forward_ms,
+        "raw_candidate_count": raw_candidate_count,
+        "kept_candidate_count": kept_candidate_count,
+    }
+
+
+def _encode_reference_visual_prompt_from_boxes(
+    reference_image: Image.Image,
+    reference_boxes_xywh: List[List[float]],
+) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, int]]:
+    """Encode one or more boxes on a reference image into native SAM3 visual-prompt tokens."""
+    reference_image = reference_image.convert("RGB")
+    encode_start = time.perf_counter()
+    reference_features = set_ultralytics_image_features(reference_image)
+    _, reference_img_feats, reference_img_pos_embeds, reference_feat_sizes = _prepare_sam3_backbone_features(
+        reference_features,
+        batch=1,
+    )
+    reference_prompt = _build_sam3_geometric_prompt_from_boxes(
+        reference_boxes_xywh,
+        reference_image.width,
+        reference_image.height,
+    )
+    reference_visual_prompt_embed, reference_visual_prompt_mask = predictor.model._encode_prompt(
+        reference_img_feats,
+        reference_img_pos_embeds,
+        reference_feat_sizes,
+        reference_prompt,
+    )
+    return reference_visual_prompt_embed, reference_visual_prompt_mask, {
+        "reference_prompt_encode_ms": int((time.perf_counter() - encode_start) * 1000)
+    }
+
+
+def _run_sam3_query_grounding_with_visual_prompt_embeddings(
+    query_image: Image.Image,
+    query_features: Dict[str, Any],
+    visual_prompt_embed: torch.Tensor,
+    visual_prompt_mask: torch.Tensor,
+    text_prompt: Optional[List[str]] = None,
+    confidence_threshold: float = 0.0,
+) -> Tuple[Dict[str, np.ndarray], Dict[str, int]]:
+    """Run SAM3 grounding on a query image using pre-encoded visual-prompt tokens."""
+    prompt_batch = text_prompt if text_prompt is not None else ["visual"]
+    if predictor.model.names != prompt_batch:
+        predictor.model.set_classes(text=prompt_batch)
+
+    grounding_start = time.perf_counter()
+    text_ids = torch.arange(len(prompt_batch), device=predictor.device, dtype=torch.long)
+    query_backbone_out, query_img_feats, query_img_pos_embeds, query_feat_sizes = _prepare_sam3_backbone_features(
+        dict(query_features),
+        batch=len(prompt_batch),
+    )
+    query_backbone_out.update({key: value for key, value in predictor.model.text_embeddings.items()})
+    text_features = query_backbone_out["language_features"][:, text_ids]
+    text_masks = query_backbone_out["language_mask"][text_ids]
+    prompt_embed = torch.cat([text_features, visual_prompt_embed], dim=0)
+    prompt_mask = torch.cat([text_masks, visual_prompt_mask], dim=1)
+
+    encoder_out = predictor.model._run_encoder(
+        query_img_feats,
+        query_img_pos_embeds,
+        query_feat_sizes,
+        prompt_embed,
+        prompt_mask,
+    )
+    raw_outputs: Dict[str, Any] = {"backbone_out": query_backbone_out}
+    raw_outputs, hs = predictor.model._run_decoder(
+        memory=encoder_out["encoder_hidden_states"],
+        pos_embed=encoder_out["pos_embed"],
+        src_mask=encoder_out["padding_mask"],
+        out=raw_outputs,
+        prompt=prompt_embed,
+        prompt_mask=prompt_mask,
+        encoder_out=encoder_out,
+    )
+    predictor.model._run_segmentation_heads(
+        out=raw_outputs,
+        backbone_out=query_backbone_out,
+        encoder_hidden_states=encoder_out["encoder_hidden_states"],
+        prompt=prompt_embed,
+        prompt_mask=prompt_mask,
+        hs=hs,
+    )
+    grounding_forward_ms = int((time.perf_counter() - grounding_start) * 1000)
+
+    arrays, raw_candidate_count, kept_candidate_count = _extract_sam3_semantic_arrays_from_raw_outputs(
+        raw_outputs,
+        query_image.height,
+        query_image.width,
+        confidence_threshold,
+    )
+    return arrays, {
+        "grounding_forward_ms": grounding_forward_ms,
+        "raw_candidate_count": raw_candidate_count,
+        "kept_candidate_count": kept_candidate_count,
+    }
+
+
 def _run_similar_query_with_reference_context(
     reference_ctx: Dict[str, Any],
     query_image: Image.Image,
@@ -1728,118 +2270,100 @@ def _run_similar_query_with_reference_context(
     sam_threshold: float,
     polygon_simplify_epsilon: float,
     pic_id: str,
+    prompt_text: Optional[str] = None,
 ) -> Dict[str, Any]:
     query_image = query_image.convert("RGB")
     query_start_time = time.perf_counter()
     reference_image = reference_ctx["reference_image"]
     reference_bnd_points = reference_ctx["reference_bnd_points"]
-    reference_feature_vec = reference_ctx["reference_feature_vec"]
     ref_best_xywh = reference_ctx["ref_best_xywh"]
-
-    set_image_start = time.perf_counter()
-    query_feature_map = set_ultralytics_image_and_features(query_image)
-    set_image_ms = int((time.perf_counter() - set_image_start) * 1000)
-
-    propose_start = time.perf_counter()
-    prompt_candidate_count = min(max(top_k * SIMILAR_CANDIDATE_MULTIPLIER, top_k), MAX_SIMILAR_PROMPT_CANDIDATES)
-    query_prompt_boxes = _propose_candidate_boxes_from_similarity(
-        sample_feature_vec=reference_feature_vec,
-        query_feature_map=query_feature_map,
-        reference_bnd_points=ref_best_xywh,
-        reference_size=(reference_image.width, reference_image.height),
-        query_size=(query_image.width, query_image.height),
-        top_k=prompt_candidate_count,
+    text_prompt, original_prompt, translated_prompt, was_translated = prepare_single_text_prompt(prompt_text)
+    native_score_threshold = max(float(similarity_threshold), float(sam_threshold))
+    reference_prompt_encode_start = time.perf_counter()
+    reference_features = set_ultralytics_image_features(reference_image)
+    _, reference_img_feats, reference_img_pos_embeds, reference_feat_sizes = _prepare_sam3_backbone_features(
+        reference_features,
+        batch=1,
     )
-    propose_ms = int((time.perf_counter() - propose_start) * 1000)
+    reference_prompt = _build_sam3_geometric_prompt_from_box(
+        ref_best_xywh,
+        reference_image.width,
+        reference_image.height,
+    )
+    reference_visual_prompt_embed, reference_visual_prompt_mask = predictor.model._encode_prompt(
+        reference_img_feats,
+        reference_img_pos_embeds,
+        reference_feat_sizes,
+        reference_prompt,
+    )
+    reference_prompt_encode_ms = int((time.perf_counter() - reference_prompt_encode_start) * 1000)
+
+    set_query_start = time.perf_counter()
+    query_features = set_ultralytics_image_features(query_image)
+    set_query_ms = int((time.perf_counter() - set_query_start) * 1000)
+    query_feature_map = query_features["backbone_fpn"][-1][0].float()
+
+    prompt_start = time.perf_counter()
+    arrays, native_profile = _run_sam3_query_grounding_with_visual_prompt_embeddings(
+        query_image=query_image,
+        query_features=query_features,
+        visual_prompt_embed=reference_visual_prompt_embed,
+        visual_prompt_mask=reference_visual_prompt_mask,
+        text_prompt=text_prompt,
+        confidence_threshold=0.0,
+    )
+    prompt_forward_ms = int((time.perf_counter() - prompt_start) * 1000)
+    masks_np = arrays["masks"]
+    boxes_np = arrays["boxes"]
+    scores_np = arrays["scores"]
 
     matched_labels: List[Dict[str, Any]] = []
     matched_masks: List[np.ndarray] = []
     matched_boxes_xyxy: List[List[float]] = []
     matched_scores: List[float] = []
-    prompt_forward_ms = 0
     candidate_loop_start = time.perf_counter()
-
-    for one_candidate in query_prompt_boxes:
-        candidate_bnd_points = one_candidate["bnd_points"]
-        candidate_xyxy = bbox_xywh_to_xyxy(candidate_bnd_points)
-        prompt_start = time.perf_counter()
-        result = run_ultralytics_prediction(
-            query_image,
-            bboxes=[candidate_xyxy],
-            confidence_threshold=0.0,
-            reset_cached_image=False,
-        )
-        prompt_forward_ms += int((time.perf_counter() - prompt_start) * 1000)
-        arrays = extract_ultralytics_arrays(result)
-        masks_np = arrays["masks"]
-        boxes_np = arrays["boxes"]
-        scores_np = arrays["scores"]
-        if scores_np.size == 0 or masks_np.shape[0] == 0:
+    for idx in range(scores_np.shape[0]):
+        one_mask = np.asarray(masks_np[idx])
+        one_box_xyxy = [float(v) for v in boxes_np[idx]]
+        one_box_xyxy = clip_xyxy_to_image(one_box_xyxy, query_image.width, query_image.height)
+        one_box_xywh = bbox_to_xywh(np.asarray(one_box_xyxy))
+        one_score = float(scores_np[idx])
+        one_primary_u8 = _extract_primary_component_mask(one_mask, one_box_xywh)
+        if one_primary_u8.size <= 1 or one_primary_u8.max() == 0:
             continue
 
-        best_local = None
-        for idx in range(masks_np.shape[0]):
-            one_mask = np.asarray(masks_np[idx])
-            one_box_xyxy = (
-                [float(v) for v in boxes_np[idx]]
-                if isinstance(boxes_np, np.ndarray) and boxes_np.shape[0] > idx
-                else candidate_xyxy
-            )
-            one_box_xyxy = clip_xyxy_to_image(one_box_xyxy, query_image.width, query_image.height)
+        primary_box_xyxy = mask_to_xyxy(one_primary_u8)
+        if primary_box_xyxy is not None:
+            one_box_xyxy = clip_xyxy_to_image(primary_box_xyxy, query_image.width, query_image.height)
             one_box_xywh = bbox_to_xywh(np.asarray(one_box_xyxy))
-            one_sam_score = float(scores_np[idx])
-            one_primary_u8 = _extract_primary_component_mask(one_mask, candidate_bnd_points)
-            if one_primary_u8.size <= 1 or one_primary_u8.max() == 0:
-                continue
-            one_primary = one_primary_u8.astype(np.float32)
-            one_mask_feat = _extract_feature_vector_from_mask(query_feature_map, one_primary)
-            one_similarity = _cosine_similarity(reference_feature_vec, one_mask_feat)
-            one_combined = 0.85 * one_similarity + 0.15 * one_sam_score
-            if best_local is None or one_combined > best_local["combined_score"]:
-                best_local = {
-                    "mask": one_primary,
-                    "mask_u8": one_primary_u8,
-                    "box_xyxy": one_box_xyxy,
-                    "box_xywh": one_box_xywh,
-                    "sam_score": one_sam_score,
-                    "similarity_score": one_similarity,
-                    "combined_score": one_combined,
-                }
 
-        if best_local is None:
-            continue
-        similarity_score = float(best_local["similarity_score"])
-        sam_score = float(best_local["sam_score"])
-        primary_area = int(np.count_nonzero(best_local["mask_u8"]))
+        primary_area = int(np.count_nonzero(one_primary_u8))
         area_ratio = primary_area / max(1, query_image.width * query_image.height)
         if area_ratio <= 0.0002:
             continue
-        if any(bbox_iou_xywh(existing["bnd_points"], best_local["box_xywh"]) > 0.75 for existing in matched_labels):
+        if one_score < native_score_threshold:
+            continue
+        if any(bbox_iou_xywh(existing["bnd_points"], one_box_xywh) > 0.75 for existing in matched_labels):
             continue
 
-        coarse_similarity = _cosine_similarity(
-            reference_feature_vec,
-            _extract_feature_vector_from_box(query_feature_map, best_local["box_xywh"], query_image.width, query_image.height),
-        )
-        if similarity_score < similarity_threshold or sam_score < sam_threshold:
-            continue
-        polygons = mask_to_polygons(best_local["mask"], epsilon=polygon_simplify_epsilon)
-        polygon_points = polygons[0]["points"] if polygons else bbox_xywh_to_polygon_points(best_local["box_xywh"])
+        polygons = mask_to_polygons(one_primary_u8.astype(np.float32), epsilon=polygon_simplify_epsilon)
+        polygon_points = polygons[0]["points"] if polygons else bbox_xywh_to_polygon_points(one_box_xywh)
         matched_labels.append(
             {
-                "category": "similar_object",
-                "score": round(sam_score, 6),
-                "similarity_score": round(similarity_score, 6),
-                "combined_score": round(float(best_local["combined_score"]), 6),
-                "coarse_similarity": round(float(coarse_similarity), 6),
-                "bnd_points": best_local["box_xywh"],
+                "category": original_prompt or "similar_object",
+                "translated_category": translated_prompt if was_translated else None,
+                "score": round(one_score, 6),
+                "similarity_score": round(one_score, 6),
+                "combined_score": round(one_score, 6),
+                "coarse_similarity": round(one_score, 6),
+                "bnd_points": one_box_xywh,
                 "polygon_points": polygon_points,
                 "mask_area": primary_area,
             }
         )
-        matched_masks.append(np.asarray(best_local["mask"]))
-        matched_boxes_xyxy.append(best_local["box_xyxy"])
-        matched_scores.append(max(0.0, min(1.0, float(best_local["combined_score"]))))
+        matched_masks.append(one_primary_u8.astype(np.float32))
+        matched_boxes_xyxy.append(one_box_xyxy)
+        matched_scores.append(max(0.0, min(1.0, one_score)))
 
     candidate_loop_ms = int((time.perf_counter() - candidate_loop_start) * 1000)
     order = sorted(range(len(matched_labels)), key=lambda i: matched_labels[i]["combined_score"], reverse=True)[:top_k]
@@ -1853,7 +2377,7 @@ def _run_similar_query_with_reference_context(
         detection_for_viz = [
             {
                 "class_name": "similar_object",
-                "original_class_name": "similar_object",
+                "original_class_name": original_prompt or "similar_object",
                 "masks": np.asarray(matched_masks),
                 "boxes": np.asarray(matched_boxes_xyxy),
                 "scores": np.asarray(matched_scores),
@@ -1868,12 +2392,16 @@ def _run_similar_query_with_reference_context(
         "pic_id": pic_id,
         "success": True,
         "similar_mode": "feature_match",
+        "prompt": original_prompt,
+        "translated_prompt": translated_prompt if was_translated else None,
+        "was_translated": was_translated,
+        "box_text_prompt_enabled": text_prompt is not None,
         "reference_bnd_points": [round(float(v), 3) for v in reference_bnd_points],
         "reference_box_auto_generated": False,
         "top_k": int(top_k),
         "similarity_threshold": float(similarity_threshold),
         "sam_threshold": float(sam_threshold),
-        "num_candidates": len(query_prompt_boxes),
+        "num_candidates": native_profile["raw_candidate_count"],
         "num_matches": len(matched_labels),
         "pic_labels": matched_labels,
         "reference_result_image": reference_ctx["reference_result_image"],
@@ -1881,14 +2409,15 @@ def _run_similar_query_with_reference_context(
         "created": int(time.time()),
         "processing_time_ms": processing_time_ms,
         "profile": {
-            "set_image_ms": set_image_ms,
-            "propose_candidates_ms": propose_ms,
             "prompt_forward_ms": prompt_forward_ms,
+            "reference_prompt_encode_ms": reference_prompt_encode_ms,
+            "set_query_ms": set_query_ms,
+            "grounding_forward_ms": native_profile["grounding_forward_ms"],
             "candidate_loop_ms": candidate_loop_ms,
-            "prompt_candidates_requested": prompt_candidate_count,
-            "prompt_candidates_used": len(query_prompt_boxes),
-            "candidate_nms_iou": SIMILAR_CANDIDATE_NMS_IOU,
-            "peak_nms_kernel": SIMILAR_PEAK_NMS_KERNEL,
+            "raw_visual_prompt_candidates": native_profile["raw_candidate_count"],
+            "post_nms_candidates": native_profile["kept_candidate_count"],
+            "native_cross_image_visual_prompt": True,
+            "native_score_threshold": round(native_score_threshold, 6),
         },
     }
 
@@ -1923,6 +2452,33 @@ def _crop_reference_patch(
                 patch = Image.fromarray(patch_arr, mode="RGB")
     patch_box = [x - x1, y - y1, w, h]
     return patch, patch_box
+
+
+def _crop_reference_patch_for_concat(
+    reference_image: Image.Image,
+    reference_bnd_points: List[float],
+    reference_mask: Optional[np.ndarray] = None,
+    paste_bnd_points: Optional[List[float]] = None,
+) -> Tuple[Image.Image, List[float], Optional[List[float]]]:
+    if paste_bnd_points is None:
+        patch, patch_box = _crop_reference_patch(reference_image, reference_bnd_points, reference_mask)
+        return patch, patch_box, None
+
+    paste_box = clip_bnd_points_to_image(paste_bnd_points, reference_image.width, reference_image.height)
+    tx, ty, tw, th = [float(v) for v in reference_bnd_points]
+    px, py, pw, ph = [float(v) for v in paste_box]
+    x1 = max(0.0, min(px, tx))
+    y1 = max(0.0, min(py, ty))
+    x2 = min(float(reference_image.width), max(px + pw, tx + tw))
+    y2 = min(float(reference_image.height), max(py + ph, ty + th))
+    if x2 <= x1 or y2 <= y1:
+        raise ValueError("Invalid paste_bnd_points after clipping")
+
+    crop_box = (int(round(x1)), int(round(y1)), int(round(x2)), int(round(y2)))
+    patch = reference_image.crop(crop_box).convert("RGB")
+    patch_box = [tx - x1, ty - y1, tw, th]
+    effective_paste_box = [round(x1, 3), round(y1, 3), round(x2 - x1, 3), round(y2 - y1, 3)]
+    return patch, patch_box, effective_paste_box
 
 
 def _build_concat_prompt_image(
@@ -2028,6 +2584,164 @@ def save_debug_image(image: Image.Image, prefix: str) -> str:
     filename = f"{safe_prefix}_{timestamp}.jpg"
     image.convert("RGB").save(RESULT_DIR / filename, quality=92)
     return filename
+
+
+def _boxes_intersect_xyxy(box_a: List[float], box_b: List[float]) -> bool:
+    ax1, ay1, ax2, ay2 = [float(v) for v in box_a]
+    bx1, by1, bx2, by2 = [float(v) for v in box_b]
+    return min(ax2, bx2) > max(ax1, bx1) and min(ay2, by2) > max(ay1, by1)
+
+
+def _build_multi_concat_prompt_image(
+    sample_contexts: List[Dict[str, Any]],
+    query_image: Image.Image,
+    scale: float,
+) -> Tuple[Image.Image, List[Dict[str, Any]], Dict[str, int]]:
+    scale = max(0.1, float(scale))
+    prepared: List[Dict[str, Any]] = []
+    max_patch_w = 0
+    prompt_content_h = CONCAT_PROMPT_PADDING
+
+    for sample_ctx in sample_contexts:
+        reference_patch, reference_patch_box, effective_paste_bnd_points = _crop_reference_patch_for_concat(
+            sample_ctx["reference_image"],
+            sample_ctx["reference_bnd_points"],
+            sample_ctx.get("reference_mask"),
+            sample_ctx.get("paste_bnd_points"),
+        )
+        sample_ctx["effective_paste_bnd_points"] = effective_paste_bnd_points
+        scaled_w = max(8, int(round(reference_patch.width * scale)))
+        scaled_h = max(8, int(round(reference_patch.height * scale)))
+        prepared.append(
+            {
+                "sample_ctx": sample_ctx,
+                "reference_patch": reference_patch,
+                "reference_patch_box": reference_patch_box,
+                "scaled_w": scaled_w,
+                "scaled_h": scaled_h,
+            }
+        )
+        max_patch_w = max(max_patch_w, scaled_w)
+        prompt_content_h += scaled_h + CONCAT_PROMPT_PADDING
+
+    left_width = max(max_patch_w + CONCAT_PROMPT_PADDING * 2, 16)
+    canvas_w = left_width + CONCAT_PROMPT_SEPARATOR + query_image.width
+    canvas_h = max(query_image.height, prompt_content_h)
+    canvas = Image.new("RGB", (canvas_w, canvas_h), (245, 245, 245))
+    query_x = left_width + CONCAT_PROMPT_SEPARATOR
+    query_y = 0
+    canvas.paste(query_image, (query_x, query_y))
+
+    placements: List[Dict[str, Any]] = []
+    occupied_regions: List[List[float]] = []
+    patch_y = CONCAT_PROMPT_PADDING
+    for item in prepared:
+        scaled_patch = item["reference_patch"].resize((item["scaled_w"], item["scaled_h"]), Image.Resampling.BICUBIC)
+        patch_x = CONCAT_PROMPT_PADDING + max(0, (left_width - item["scaled_w"] - CONCAT_PROMPT_PADDING * 2) // 2)
+        patch_region = [patch_x, patch_y, patch_x + item["scaled_w"], patch_y + item["scaled_h"]]
+        if any(_boxes_intersect_xyxy(patch_region, existing) for existing in occupied_regions):
+            raise ValueError("multi-sample concat layout produced overlapping sample patches")
+        occupied_regions.append(patch_region)
+        canvas.paste(scaled_patch, (patch_x, patch_y))
+
+        ref_x, ref_y, ref_w, ref_h = [float(v) for v in item["reference_patch_box"]]
+        prompt_box = [
+            patch_x + ref_x * scale,
+            patch_y + ref_y * scale,
+            patch_x + (ref_x + ref_w) * scale,
+            patch_y + (ref_y + ref_h) * scale,
+        ]
+        placements.append(
+            {
+                "sample_ctx": item["sample_ctx"],
+                "prompt_box_xyxy": prompt_box,
+                "patch_region_xyxy": patch_region,
+            }
+        )
+        patch_y += item["scaled_h"] + CONCAT_PROMPT_PADDING
+
+    regions = {
+        "query_x": query_x,
+        "query_y": query_y,
+        "query_w": query_image.width,
+        "query_h": query_image.height,
+        "prompt_region_w": left_width + CONCAT_PROMPT_SEPARATOR,
+        "canvas_w": canvas_w,
+        "canvas_h": canvas_h,
+    }
+    return canvas, placements, regions
+
+
+def _nms_multi_similar_records(
+    records: List[Dict[str, Any]],
+    iou_threshold: float,
+    top_k_per_category: int,
+) -> List[Dict[str, Any]]:
+    grouped: Dict[str, List[Dict[str, Any]]] = {}
+    for record in records:
+        grouped.setdefault(record["label"]["category"], []).append(record)
+
+    kept_records: List[Dict[str, Any]] = []
+    for category in sorted(grouped):
+        category_records = sorted(
+            grouped[category],
+            key=lambda item: float(item["label"].get("combined_score", 0.0)),
+            reverse=True,
+        )
+        kept_for_category: List[Dict[str, Any]] = []
+        for record in category_records:
+            if any(
+                bbox_iou_xywh(existing["label"]["bnd_points"], record["label"]["bnd_points"]) > iou_threshold
+                for existing in kept_for_category
+            ):
+                continue
+            kept_for_category.append(record)
+            if len(kept_for_category) >= top_k_per_category:
+                break
+        kept_records.extend(kept_for_category)
+
+    kept_records.sort(key=lambda item: float(item["label"].get("combined_score", 0.0)), reverse=True)
+    return kept_records
+
+
+def _normalize_sample_type(sample: Dict[str, Any]) -> str:
+    raw_sample_type = _normalize_prompt_label(str(sample.get("sample_type", sample.get("role", "")) or "")).lower()
+    if raw_sample_type in {"negative", "neg"} or sample.get("is_negative") is True:
+        return "negative"
+    return "positive"
+
+
+def _normalize_multi_sample_inputs(samples: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    normalized_samples: List[Dict[str, Any]] = []
+    for index, sample in enumerate(samples, start=1):
+        category = _normalize_prompt_label(str(sample.get("category", "")))
+        if not category:
+            raise ValueError(f"samples[{index - 1}].category is required")
+        reference_image = sample.get("reference_image")
+        if not isinstance(reference_image, Image.Image):
+            raise ValueError(f"samples[{index - 1}].reference_image is required")
+        reference_bnd_points = sample.get("reference_bnd_points")
+        if not isinstance(reference_bnd_points, list) or len(reference_bnd_points) != 4:
+            raise ValueError(f"samples[{index - 1}].reference_bnd_points must be [x, y, w, h]")
+        sample_id = _normalize_prompt_label(str(sample.get("sample_id", "") or "")) or f"sample_{index}"
+        paste_bnd_points = sample.get("paste_bnd_points")
+        if paste_bnd_points is not None:
+            if not isinstance(paste_bnd_points, list) or len(paste_bnd_points) != 4:
+                raise ValueError(f"samples[{index - 1}].paste_bnd_points must be [x, y, w, h]")
+            paste_bnd_points = [float(v) for v in paste_bnd_points]
+        normalized_samples.append(
+            {
+                "sample_id": sample_id,
+                "source_image_id": _normalize_prompt_label(str(sample.get("source_image_id", "") or "")) or sample_id,
+                "category": category,
+                "sample_type": _normalize_sample_type(sample),
+                "reference_image": reference_image.convert("RGB"),
+                "reference_bnd_points": [float(v) for v in reference_bnd_points],
+                "paste_bnd_points": paste_bnd_points,
+                "prompt": _normalize_prompt_label(str(sample.get("prompt", "") or "")) or None,
+            }
+        )
+    return normalized_samples
 
 
 def _run_concat_prompt_query(
@@ -2436,6 +3150,7 @@ def run_similar_object_pipeline(
                     sam_threshold,
                     polygon_simplify_epsilon,
                     normalized_pic_id,
+                    prompt,
                 )
 
     if EMPTY_CUDA_CACHE_EACH_REQUEST and torch.cuda.is_available():
@@ -2518,6 +3233,7 @@ def run_similar_object_batch_pipeline(
                     sam_threshold,
                     polygon_simplify_epsilon,
                     query_pic_id,
+                    prompt,
                 )
             if query_names and index < len(query_names):
                 one_result["query_name"] = query_names[index]
@@ -2548,6 +3264,769 @@ def run_similar_object_batch_pipeline(
         "similar_mode": similar_mode,
         "total_num_matches": sum(int(item.get("num_matches", 0)) for item in query_results),
         "total_num_candidates": sum(int(item.get("num_candidates", 0)) for item in query_results),
+        "reference_result_image": query_results[0].get("reference_result_image") if query_results else None,
+        "created": int(time.time()),
+        "processing_time_ms": total_processing_ms,
+    }
+
+
+def _prepare_multi_similar_reference_contexts(
+    samples: List[Dict[str, Any]],
+    top_k: int,
+) -> List[Dict[str, Any]]:
+    sample_contexts: List[Dict[str, Any]] = []
+    for sample in _normalize_multi_sample_inputs(samples):
+        reference_ctx = _prepare_similar_reference_context(
+            sample["reference_image"],
+            sample["reference_bnd_points"],
+            top_k,
+        )
+        text_prompt, original_prompt, translated_prompt, was_translated = prepare_single_text_prompt(sample.get("prompt"))
+        reference_ctx.update(
+            {
+                "sample_id": sample["sample_id"],
+                "source_image_id": sample.get("source_image_id", sample["sample_id"]),
+                "category": sample["category"],
+                "sample_type": sample["sample_type"],
+                "is_negative": sample["sample_type"] == "negative",
+                "paste_bnd_points": sample.get("paste_bnd_points"),
+                "prompt": original_prompt,
+                "translated_prompt": translated_prompt if was_translated else None,
+                "was_translated": was_translated,
+                "text_prompt": text_prompt,
+            }
+        )
+        sample_contexts.append(reference_ctx)
+    if not any(sample_ctx.get("sample_type") != "negative" for sample_ctx in sample_contexts):
+        raise ValueError("At least one positive sample is required")
+    return sample_contexts
+
+
+def _format_multi_prompt_source_label(values: List[str]) -> str:
+    unique_values: List[str] = []
+    for one_value in values:
+        normalized = str(one_value or "").strip()
+        if not normalized or normalized in unique_values:
+            continue
+        unique_values.append(normalized)
+    if not unique_values:
+        return "-"
+    if len(unique_values) <= 3:
+        return " | ".join(unique_values)
+    return " | ".join(unique_values[:3]) + f" | ...(+{len(unique_values) - 3})"
+
+
+def _resolve_multi_group_text_prompt(
+    group_contexts: List[Dict[str, Any]],
+) -> Tuple[Optional[List[str]], Optional[str], Optional[str], bool]:
+    prompt_pairs: List[Tuple[str, str]] = []
+    for sample_ctx in group_contexts:
+        original_prompt = _normalize_prompt_label(sample_ctx.get("prompt") or "")
+        if not original_prompt:
+            continue
+        translated_prompt = _normalize_prompt_label(sample_ctx.get("translated_prompt") or original_prompt).lower()
+        if not translated_prompt:
+            translated_prompt = original_prompt
+        prompt_pairs.append((original_prompt, translated_prompt))
+
+    if not prompt_pairs:
+        return None, None, None, False
+
+    unique_original: List[str] = []
+    unique_translated: List[str] = []
+    for original_prompt, translated_prompt in prompt_pairs:
+        if original_prompt not in unique_original:
+            unique_original.append(original_prompt)
+        if translated_prompt not in unique_translated:
+            unique_translated.append(translated_prompt)
+
+    if len(unique_translated) == 1:
+        translated_prompt = unique_translated[0]
+        original_prompt = unique_original[0]
+        return [translated_prompt], original_prompt, translated_prompt, translated_prompt != original_prompt
+
+    original_prompt_joined = "; ".join(unique_original)
+    translated_prompt_joined = "; ".join(unique_translated)
+    return None, original_prompt_joined, translated_prompt_joined, translated_prompt_joined != original_prompt_joined
+
+
+def _group_multi_sample_contexts_for_native_prompt(sample_contexts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    grouped: Dict[str, Dict[str, Any]] = {}
+    ordered_groups: List[Dict[str, Any]] = []
+
+    for sample_ctx in sample_contexts:
+        category = sample_ctx["category"]
+        group = grouped.get(category)
+        if group is None:
+            group = {
+                "category": category,
+                "sample_contexts": [],
+                "positive_sample_contexts": [],
+                "negative_sample_contexts": [],
+                "sample_ids": [],
+                "source_image_ids": [],
+                "source_groups": {},
+                "negative_sample_ids": [],
+                "negative_source_image_ids": [],
+                "negative_source_groups": {},
+            }
+            grouped[category] = group
+            ordered_groups.append(group)
+
+        group["sample_contexts"].append(sample_ctx)
+        source_image_id = sample_ctx.get("source_image_id", sample_ctx["sample_id"])
+        is_negative = sample_ctx.get("sample_type") == "negative" or sample_ctx.get("is_negative") is True
+        if is_negative:
+            group["negative_sample_contexts"].append(sample_ctx)
+            group["negative_sample_ids"].append(sample_ctx["sample_id"])
+            group["negative_source_image_ids"].append(source_image_id)
+            source_groups = group["negative_source_groups"]
+        else:
+            group["positive_sample_contexts"].append(sample_ctx)
+            group["sample_ids"].append(sample_ctx["sample_id"])
+            group["source_image_ids"].append(source_image_id)
+            source_groups = group["source_groups"]
+        source_group = source_groups.get(source_image_id)
+        if source_group is None:
+            source_group = {
+                "source_image_id": source_image_id,
+                "reference_image": sample_ctx["reference_image"],
+                "reference_boxes": [],
+                "sample_ids": [],
+            }
+            source_groups[source_image_id] = source_group
+        source_group["reference_boxes"].append(sample_ctx["ref_best_xywh"])
+        source_group["sample_ids"].append(sample_ctx["sample_id"])
+
+    finalized_groups: List[Dict[str, Any]] = []
+    for group in ordered_groups:
+        if not group["positive_sample_contexts"]:
+            continue
+        text_prompt, original_prompt, translated_prompt, was_translated = _resolve_multi_group_text_prompt(
+            group["positive_sample_contexts"]
+        )
+        finalized_groups.append(
+            {
+                "category": group["category"],
+                "sample_contexts": group["positive_sample_contexts"],
+                "negative_sample_contexts": group["negative_sample_contexts"],
+                "sample_ids": group["sample_ids"],
+                "source_image_ids": group["source_image_ids"],
+                "sample_id_display": _format_multi_prompt_source_label(group["sample_ids"]),
+                "source_image_id_display": _format_multi_prompt_source_label(group["source_image_ids"]),
+                "source_groups": list(group["source_groups"].values()),
+                "negative_sample_ids": group["negative_sample_ids"],
+                "negative_source_image_ids": group["negative_source_image_ids"],
+                "negative_source_groups": list(group["negative_source_groups"].values()),
+                "text_prompt": text_prompt,
+                "prompt": original_prompt,
+                "translated_prompt": translated_prompt if was_translated else None,
+                "was_translated": was_translated,
+            }
+        )
+    return finalized_groups
+
+
+def _collect_negative_visual_prompt_boxes(
+    group: Dict[str, Any],
+    query_image: Image.Image,
+    query_features: Dict[str, Any],
+    native_score_threshold: float,
+) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
+    negative_source_groups = group.get("negative_source_groups") or []
+    profile = {
+        "negative_reference_prompt_encode_ms": 0,
+        "negative_grounding_forward_ms": 0,
+        "negative_raw_candidates": 0,
+        "negative_post_nms_candidates": 0,
+        "negative_filter_candidates": 0,
+    }
+    if not negative_source_groups:
+        return [], profile
+
+    visual_prompt_embeds: List[torch.Tensor] = []
+    visual_prompt_masks: List[torch.Tensor] = []
+    for source_group in negative_source_groups:
+        prompt_embed, prompt_mask, prompt_profile = _encode_reference_visual_prompt_from_boxes(
+            source_group["reference_image"],
+            source_group["reference_boxes"],
+        )
+        profile["negative_reference_prompt_encode_ms"] += int(prompt_profile["reference_prompt_encode_ms"])
+        visual_prompt_embeds.append(prompt_embed)
+        visual_prompt_masks.append(prompt_mask)
+
+    if not visual_prompt_embeds:
+        return [], profile
+
+    merged_prompt_embed = torch.cat(visual_prompt_embeds, dim=0)
+    merged_prompt_mask = torch.cat(visual_prompt_masks, dim=1)
+    arrays, negative_profile = _run_sam3_query_grounding_with_visual_prompt_embeddings(
+        query_image=query_image,
+        query_features=query_features,
+        visual_prompt_embed=merged_prompt_embed,
+        visual_prompt_mask=merged_prompt_mask,
+        text_prompt=group.get("text_prompt"),
+        confidence_threshold=0.0,
+    )
+    profile["negative_grounding_forward_ms"] += int(negative_profile["grounding_forward_ms"])
+    profile["negative_raw_candidates"] += int(negative_profile["raw_candidate_count"])
+    profile["negative_post_nms_candidates"] += int(negative_profile["kept_candidate_count"])
+
+    negative_records: List[Dict[str, Any]] = []
+    masks_np = arrays["masks"]
+    boxes_np = arrays["boxes"]
+    scores_np = arrays["scores"]
+    for index in range(scores_np.shape[0]):
+        one_mask = np.asarray(masks_np[index])
+        one_box_xyxy = [float(v) for v in boxes_np[index]]
+        one_box_xyxy = clip_xyxy_to_image(one_box_xyxy, query_image.width, query_image.height)
+        one_box_xywh = bbox_to_xywh(np.asarray(one_box_xyxy))
+        one_score = float(scores_np[index])
+        primary_u8 = _extract_primary_component_mask(one_mask, one_box_xywh)
+        if primary_u8.size <= 1 or primary_u8.max() == 0:
+            continue
+
+        primary_box_xyxy = mask_to_xyxy(primary_u8)
+        if primary_box_xyxy is not None:
+            one_box_xyxy = clip_xyxy_to_image(primary_box_xyxy, query_image.width, query_image.height)
+            one_box_xywh = bbox_to_xywh(np.asarray(one_box_xyxy))
+
+        primary_area = int(np.count_nonzero(primary_u8))
+        area_ratio = primary_area / max(1, query_image.width * query_image.height)
+        if area_ratio <= 0.0002 or one_score < native_score_threshold:
+            continue
+
+        negative_records.append(
+            {
+                "bnd_points": one_box_xywh,
+                "box_xyxy": one_box_xyxy,
+                "score": max(0.0, min(1.0, one_score)),
+            }
+        )
+
+    profile["negative_filter_candidates"] = len(negative_records)
+    return negative_records, profile
+
+
+def _is_suppressed_by_negative_sample(
+    candidate_bnd_points: List[float],
+    negative_records: List[Dict[str, Any]],
+    iou_threshold: float,
+) -> bool:
+    return any(
+        bbox_iou_xywh(candidate_bnd_points, negative_record["bnd_points"]) >= iou_threshold
+        for negative_record in negative_records
+    )
+
+
+def _run_multi_native_visual_prompt_query(
+    sample_contexts: List[Dict[str, Any]],
+    query_image: Image.Image,
+    top_k: int,
+    similarity_threshold: float,
+    sam_threshold: float,
+    nms_iou: float,
+    polygon_simplify_epsilon: float,
+    pic_id: str,
+) -> Dict[str, Any]:
+    query_image = query_image.convert("RGB")
+    query_start_time = time.perf_counter()
+    grouped_prompts = _group_multi_sample_contexts_for_native_prompt(sample_contexts)
+    native_score_threshold = max(float(similarity_threshold), float(sam_threshold))
+
+    set_query_start = time.perf_counter()
+    query_features = set_ultralytics_image_features(query_image)
+    set_query_ms = int((time.perf_counter() - set_query_start) * 1000)
+
+    candidate_records: List[Dict[str, Any]] = []
+    raw_candidate_count = 0
+    post_nms_candidate_count = 0
+    total_reference_prompt_encode_ms = 0
+    total_grounding_forward_ms = 0
+    total_candidate_loop_ms = 0
+    total_negative_reference_prompt_encode_ms = 0
+    total_negative_grounding_forward_ms = 0
+    total_negative_raw_candidate_count = 0
+    total_negative_post_nms_candidate_count = 0
+    total_negative_filter_candidate_count = 0
+    total_suppressed_by_negative_count = 0
+    group_profiles: List[Dict[str, Any]] = []
+
+    for group in grouped_prompts:
+        negative_records, negative_profile = _collect_negative_visual_prompt_boxes(
+            group,
+            query_image,
+            query_features,
+            native_score_threshold,
+        )
+        total_negative_reference_prompt_encode_ms += int(negative_profile["negative_reference_prompt_encode_ms"])
+        total_negative_grounding_forward_ms += int(negative_profile["negative_grounding_forward_ms"])
+        total_negative_raw_candidate_count += int(negative_profile["negative_raw_candidates"])
+        total_negative_post_nms_candidate_count += int(negative_profile["negative_post_nms_candidates"])
+        total_negative_filter_candidate_count += int(negative_profile["negative_filter_candidates"])
+        suppressed_by_negative_count = 0
+
+        visual_prompt_embeds: List[torch.Tensor] = []
+        visual_prompt_masks: List[torch.Tensor] = []
+        group_prompt_encode_ms = 0
+        for source_group in group["source_groups"]:
+            prompt_embed, prompt_mask, prompt_profile = _encode_reference_visual_prompt_from_boxes(
+                source_group["reference_image"],
+                source_group["reference_boxes"],
+            )
+            group_prompt_encode_ms += int(prompt_profile["reference_prompt_encode_ms"])
+            visual_prompt_embeds.append(prompt_embed)
+            visual_prompt_masks.append(prompt_mask)
+        if not visual_prompt_embeds:
+            continue
+
+        merged_prompt_embed = torch.cat(visual_prompt_embeds, dim=0)
+        merged_prompt_mask = torch.cat(visual_prompt_masks, dim=1)
+        arrays, group_profile = _run_sam3_query_grounding_with_visual_prompt_embeddings(
+            query_image=query_image,
+            query_features=query_features,
+            visual_prompt_embed=merged_prompt_embed,
+            visual_prompt_mask=merged_prompt_mask,
+            text_prompt=group["text_prompt"],
+            confidence_threshold=0.0,
+        )
+        group_candidate_loop_start = time.perf_counter()
+        masks_np = arrays["masks"]
+        boxes_np = arrays["boxes"]
+        scores_np = arrays["scores"]
+
+        raw_candidate_count += int(group_profile["raw_candidate_count"])
+        post_nms_candidate_count += int(group_profile["kept_candidate_count"])
+        total_reference_prompt_encode_ms += group_prompt_encode_ms
+        total_grounding_forward_ms += int(group_profile["grounding_forward_ms"])
+
+        for index in range(scores_np.shape[0]):
+            one_mask = np.asarray(masks_np[index])
+            one_box_xyxy = [float(v) for v in boxes_np[index]]
+            one_box_xyxy = clip_xyxy_to_image(one_box_xyxy, query_image.width, query_image.height)
+            one_box_xywh = bbox_to_xywh(np.asarray(one_box_xyxy))
+            one_score = float(scores_np[index])
+            primary_u8 = _extract_primary_component_mask(one_mask, one_box_xywh)
+            if primary_u8.size <= 1 or primary_u8.max() == 0:
+                continue
+
+            primary_box_xyxy = mask_to_xyxy(primary_u8)
+            if primary_box_xyxy is not None:
+                one_box_xyxy = clip_xyxy_to_image(primary_box_xyxy, query_image.width, query_image.height)
+                one_box_xywh = bbox_to_xywh(np.asarray(one_box_xyxy))
+
+            primary_area = int(np.count_nonzero(primary_u8))
+            area_ratio = primary_area / max(1, query_image.width * query_image.height)
+            if area_ratio <= 0.0002 or one_score < native_score_threshold:
+                continue
+            if _is_suppressed_by_negative_sample(one_box_xywh, negative_records, MULTI_NEGATIVE_FILTER_IOU):
+                suppressed_by_negative_count += 1
+                total_suppressed_by_negative_count += 1
+                continue
+
+            polygons = mask_to_polygons(primary_u8.astype(np.float32), epsilon=polygon_simplify_epsilon)
+            polygon_points = polygons[0]["points"] if polygons else bbox_xywh_to_polygon_points(one_box_xywh)
+            label = {
+                "category": group["category"],
+                "sample_id": group["sample_id_display"],
+                "sample_ids": group["sample_ids"],
+                "source_image_id": group["source_image_id_display"],
+                "source_image_ids": group["source_image_ids"],
+                "prompt": group.get("prompt"),
+                "translated_prompt": group.get("translated_prompt"),
+                "score": round(one_score, 6),
+                "similarity_score": round(one_score, 6),
+                "combined_score": round(one_score, 6),
+                "coarse_similarity": round(one_score, 6),
+                "bnd_points": one_box_xywh,
+                "polygon_points": polygon_points,
+                "mask_area": primary_area,
+            }
+            candidate_records.append(
+                {
+                    "label": label,
+                    "mask": primary_u8.astype(np.float32),
+                    "box_xyxy": one_box_xyxy,
+                    "score": max(0.0, min(1.0, one_score)),
+                }
+            )
+
+        group_candidate_loop_ms = int((time.perf_counter() - group_candidate_loop_start) * 1000)
+        total_candidate_loop_ms += group_candidate_loop_ms
+        group_profiles.append(
+            {
+                "category": group["category"],
+                "num_samples": len(group["sample_contexts"]),
+                "num_negative_samples": len(group.get("negative_sample_contexts") or []),
+                "num_source_images": len(group["source_groups"]),
+                "num_negative_source_images": len(group.get("negative_source_groups") or []),
+                "reference_prompt_encode_ms": group_prompt_encode_ms,
+                "grounding_forward_ms": int(group_profile["grounding_forward_ms"]),
+                "raw_candidates": int(group_profile["raw_candidate_count"]),
+                "post_nms_candidates": int(group_profile["kept_candidate_count"]),
+                "negative_reference_prompt_encode_ms": int(negative_profile["negative_reference_prompt_encode_ms"]),
+                "negative_grounding_forward_ms": int(negative_profile["negative_grounding_forward_ms"]),
+                "negative_raw_candidates": int(negative_profile["negative_raw_candidates"]),
+                "negative_post_nms_candidates": int(negative_profile["negative_post_nms_candidates"]),
+                "negative_filter_candidates": int(negative_profile["negative_filter_candidates"]),
+                "suppressed_by_negative_samples": suppressed_by_negative_count,
+                "candidate_loop_ms": group_candidate_loop_ms,
+            }
+        )
+
+    kept_records = _nms_multi_similar_records(candidate_records, nms_iou, top_k)
+    matched_labels = [record["label"] for record in kept_records]
+
+    result_image = None
+    if kept_records:
+        category_order: Dict[str, int] = {}
+        for record in kept_records:
+            category = record["label"]["category"]
+            if category not in category_order:
+                category_order[category] = len(category_order)
+        detections_for_viz: List[Dict[str, Any]] = []
+        for category, color_index in category_order.items():
+            category_records = [record for record in kept_records if record["label"]["category"] == category]
+            detections_for_viz.append(
+                {
+                    "class_name": category,
+                    "original_class_name": category,
+                    "masks": np.asarray([record["mask"] for record in category_records]),
+                    "boxes": np.asarray([record["box_xyxy"] for record in category_records]),
+                    "scores": np.asarray([record["score"] for record in category_records]),
+                    "color": build_class_color(color_index),
+                }
+            )
+        result_image = visualize_results(query_image, detections_for_viz)
+
+    sample_result_images = [
+        {
+            "sample_id": sample_ctx["sample_id"],
+            "source_image_id": sample_ctx.get("source_image_id", sample_ctx["sample_id"]),
+            "category": sample_ctx["category"],
+            "sample_type": sample_ctx.get("sample_type", "positive"),
+            "is_negative": sample_ctx.get("sample_type") == "negative",
+            "reference_bnd_points": [round(float(v), 3) for v in sample_ctx["reference_bnd_points"]],
+            "paste_bnd_points": sample_ctx.get("effective_paste_bnd_points"),
+            "reference_result_image": sample_ctx["reference_result_image"],
+            "prompt": sample_ctx.get("prompt"),
+            "translated_prompt": sample_ctx.get("translated_prompt"),
+        }
+        for sample_ctx in sample_contexts
+    ]
+    processing_time_ms = int((time.perf_counter() - query_start_time) * 1000)
+    category_counts: Dict[str, int] = {}
+    for label in matched_labels:
+        category_counts[label["category"]] = category_counts.get(label["category"], 0) + 1
+    positive_sample_count = sum(1 for sample_ctx in sample_contexts if sample_ctx.get("sample_type") != "negative")
+    negative_sample_count = sum(1 for sample_ctx in sample_contexts if sample_ctx.get("sample_type") == "negative")
+
+    return {
+        "model": MODEL_LABEL,
+        "pic_id": pic_id,
+        "success": True,
+        "similar_mode": "multi_visual_prompt",
+        "top_k": int(top_k),
+        "top_k_scope": "per_category",
+        "similarity_threshold": float(similarity_threshold),
+        "sam_threshold": float(sam_threshold),
+        "nms_iou": float(nms_iou),
+        "num_samples": len(sample_contexts),
+        "num_positive_samples": positive_sample_count,
+        "num_negative_samples": negative_sample_count,
+        "num_groups": len(grouped_prompts),
+        "num_candidates": raw_candidate_count,
+        "num_matches": len(matched_labels),
+        "category_counts": category_counts,
+        "pic_labels": matched_labels,
+        "sample_result_images": sample_result_images,
+        "reference_result_image": sample_result_images[0]["reference_result_image"] if sample_result_images else None,
+        "result_image": result_image,
+        "created": int(time.time()),
+        "processing_time_ms": processing_time_ms,
+        "profile": {
+            "set_query_ms": set_query_ms,
+            "reference_prompt_encode_ms": total_reference_prompt_encode_ms,
+            "grounding_forward_ms": total_grounding_forward_ms,
+            "candidate_loop_ms": total_candidate_loop_ms,
+            "negative_reference_prompt_encode_ms": total_negative_reference_prompt_encode_ms,
+            "negative_grounding_forward_ms": total_negative_grounding_forward_ms,
+            "raw_visual_prompt_candidates": raw_candidate_count,
+            "post_nms_candidates": post_nms_candidate_count,
+            "negative_raw_visual_prompt_candidates": total_negative_raw_candidate_count,
+            "negative_post_nms_candidates": total_negative_post_nms_candidate_count,
+            "negative_filter_candidates": total_negative_filter_candidate_count,
+            "suppressed_by_negative_samples": total_suppressed_by_negative_count,
+            "negative_filter_iou": round(MULTI_NEGATIVE_FILTER_IOU, 6),
+            "final_nms_iou": float(nms_iou),
+            "native_multi_visual_prompt": True,
+            "native_score_threshold": round(native_score_threshold, 6),
+            "groups": group_profiles,
+        },
+    }
+
+
+def _run_multi_concat_prompt_query(
+    sample_contexts: List[Dict[str, Any]],
+    query_image: Image.Image,
+    top_k: int,
+    similarity_threshold: float,
+    sam_threshold: float,
+    nms_iou: float,
+    polygon_simplify_epsilon: float,
+    pic_id: str,
+) -> Dict[str, Any]:
+    query_image = query_image.convert("RGB")
+    query_start_time = time.perf_counter()
+    concat_debug_images: List[str] = []
+    candidate_count = 0
+    prompt_forward_ms = 0
+    candidate_records: List[Dict[str, Any]] = []
+
+    scales = CONCAT_PROMPT_SCALES or [1.0]
+    for scale in scales:
+        concat_image, placements, regions = _build_multi_concat_prompt_image(sample_contexts, query_image, scale)
+        concat_debug_images.append(save_debug_image(concat_image, f"multi_concat_prompt_{pic_id}_{scale:g}"))
+        query_feature_map = set_ultralytics_image_and_features(query_image)
+
+        for placement in placements:
+            sample_ctx = placement["sample_ctx"]
+            prompt_start = time.perf_counter()
+            result = run_ultralytics_prediction(
+                concat_image,
+                text=sample_ctx.get("text_prompt"),
+                bboxes=[placement["prompt_box_xyxy"]],
+                confidence_threshold=0.0,
+            )
+            prompt_forward_ms += int((time.perf_counter() - prompt_start) * 1000)
+            arrays = extract_ultralytics_arrays(result)
+            masks_np = arrays["masks"]
+            boxes_np = arrays["boxes"]
+            scores_np = arrays["scores"]
+            candidate_count += int(scores_np.size)
+            if scores_np.size == 0 or masks_np.shape[0] == 0:
+                continue
+
+            reference_feature_vec = sample_ctx["reference_feature_vec"]
+            category_name = sample_ctx["category"]
+
+            for idx in range(masks_np.shape[0]):
+                raw_concat_box_xyxy = (
+                    [float(v) for v in boxes_np[idx]]
+                    if isinstance(boxes_np, np.ndarray) and boxes_np.shape[0] > idx
+                    else None
+                )
+                query_box_from_concat = (
+                    _intersect_concat_box_to_query(raw_concat_box_xyxy, regions)
+                    if raw_concat_box_xyxy is not None
+                    else None
+                )
+                if raw_concat_box_xyxy is not None and query_box_from_concat is None:
+                    continue
+
+                query_mask = _translate_concat_mask_to_query(masks_np[idx], regions)
+                mask_box_xyxy = mask_to_xyxy(query_mask)
+                if mask_box_xyxy is None:
+                    continue
+                query_box_xyxy = clip_xyxy_to_image(mask_box_xyxy, query_image.width, query_image.height)
+                if query_box_from_concat is not None:
+                    query_box_xyxy = clip_xyxy_to_image(
+                        [
+                            min(query_box_xyxy[0], query_box_from_concat[0]),
+                            min(query_box_xyxy[1], query_box_from_concat[1]),
+                            max(query_box_xyxy[2], query_box_from_concat[2]),
+                            max(query_box_xyxy[3], query_box_from_concat[3]),
+                        ],
+                        query_image.width,
+                        query_image.height,
+                    )
+                query_box_xywh = bbox_to_xywh(np.asarray(query_box_xyxy))
+                primary_u8 = _extract_primary_component_mask(query_mask, query_box_xywh)
+                if primary_u8.size <= 1 or primary_u8.max() == 0:
+                    continue
+                primary_box_xyxy = mask_to_xyxy(primary_u8)
+                if primary_box_xyxy is None:
+                    continue
+                query_box_xyxy = clip_xyxy_to_image(primary_box_xyxy, query_image.width, query_image.height)
+                query_box_xywh = bbox_to_xywh(np.asarray(query_box_xyxy))
+                primary_area = int(np.count_nonzero(primary_u8))
+                area_ratio = primary_area / max(1, query_image.width * query_image.height)
+                if area_ratio <= 0.0002:
+                    continue
+
+                mask_feat = _extract_feature_vector_from_mask(query_feature_map, primary_u8.astype(np.float32))
+                similarity_score = _cosine_similarity(reference_feature_vec, mask_feat)
+                sam_score = float(scores_np[idx])
+                if similarity_score < similarity_threshold or sam_score < sam_threshold:
+                    continue
+                combined_score = 0.5 * similarity_score + 0.5 * sam_score
+
+                polygons = mask_to_polygons(primary_u8.astype(np.float32), epsilon=polygon_simplify_epsilon)
+                polygon_points = polygons[0]["points"] if polygons else bbox_xywh_to_polygon_points(query_box_xywh)
+                label = {
+                    "category": category_name,
+                    "sample_id": sample_ctx["sample_id"],
+                    "source_image_id": sample_ctx.get("source_image_id", sample_ctx["sample_id"]),
+                    "paste_bnd_points": sample_ctx.get("effective_paste_bnd_points"),
+                    "prompt": sample_ctx.get("prompt"),
+                    "translated_prompt": sample_ctx.get("translated_prompt"),
+                    "score": round(sam_score, 6),
+                    "similarity_score": round(similarity_score, 6),
+                    "combined_score": round(float(combined_score), 6),
+                    "coarse_similarity": round(similarity_score, 6),
+                    "bnd_points": query_box_xywh,
+                    "polygon_points": polygon_points,
+                    "mask_area": primary_area,
+                    "concat_scale": round(float(scale), 4),
+                }
+                candidate_records.append(
+                    {
+                        "label": label,
+                        "mask": primary_u8.astype(np.float32),
+                        "box_xyxy": query_box_xyxy,
+                        "score": max(0.0, min(1.0, float(combined_score))),
+                    }
+                )
+
+    kept_records = _nms_multi_similar_records(candidate_records, nms_iou, top_k)
+    matched_labels = [record["label"] for record in kept_records]
+
+    result_image = None
+    if kept_records:
+        category_order: Dict[str, int] = {}
+        for record in kept_records:
+            category = record["label"]["category"]
+            if category not in category_order:
+                category_order[category] = len(category_order)
+        detections_for_viz: List[Dict[str, Any]] = []
+        for category, color_index in category_order.items():
+            category_records = [record for record in kept_records if record["label"]["category"] == category]
+            detections_for_viz.append(
+                {
+                    "class_name": category,
+                    "original_class_name": category,
+                    "masks": np.asarray([record["mask"] for record in category_records]),
+                    "boxes": np.asarray([record["box_xyxy"] for record in category_records]),
+                    "scores": np.asarray([record["score"] for record in category_records]),
+                    "color": build_class_color(color_index),
+                }
+            )
+        result_image = visualize_results(query_image, detections_for_viz)
+
+    sample_result_images = [
+        {
+            "sample_id": sample_ctx["sample_id"],
+            "source_image_id": sample_ctx.get("source_image_id", sample_ctx["sample_id"]),
+            "category": sample_ctx["category"],
+            "reference_bnd_points": [round(float(v), 3) for v in sample_ctx["reference_bnd_points"]],
+            "paste_bnd_points": sample_ctx.get("effective_paste_bnd_points"),
+            "reference_result_image": sample_ctx["reference_result_image"],
+            "prompt": sample_ctx.get("prompt"),
+            "translated_prompt": sample_ctx.get("translated_prompt"),
+        }
+        for sample_ctx in sample_contexts
+    ]
+    processing_time_ms = int((time.perf_counter() - query_start_time) * 1000)
+    category_counts: Dict[str, int] = {}
+    for label in matched_labels:
+        category_counts[label["category"]] = category_counts.get(label["category"], 0) + 1
+
+    return {
+        "model": MODEL_LABEL,
+        "pic_id": pic_id,
+        "success": True,
+        "similar_mode": "multi_concat_prompt",
+        "top_k": int(top_k),
+        "top_k_scope": "per_category",
+        "similarity_threshold": float(similarity_threshold),
+        "sam_threshold": float(sam_threshold),
+        "nms_iou": float(nms_iou),
+        "num_samples": len(sample_contexts),
+        "num_candidates": candidate_count,
+        "num_matches": len(matched_labels),
+        "category_counts": category_counts,
+        "pic_labels": matched_labels,
+        "sample_result_images": sample_result_images,
+        "reference_result_image": sample_result_images[0]["reference_result_image"] if sample_result_images else None,
+        "concat_prompt_images": concat_debug_images,
+        "result_image": result_image,
+        "created": int(time.time()),
+        "processing_time_ms": processing_time_ms,
+        "profile": {
+            "prompt_forward_ms": prompt_forward_ms,
+            "concat_scales": scales,
+            "concat_padding": CONCAT_PROMPT_PADDING,
+            "concat_separator": CONCAT_PROMPT_SEPARATOR,
+            "candidate_count_before_nms": len(candidate_records),
+            "final_nms_iou": float(nms_iou),
+        },
+    }
+
+
+def run_multi_similar_object_batch_pipeline(
+    samples: List[Dict[str, Any]],
+    query_images: List[Image.Image],
+    top_k: int,
+    similarity_threshold: float,
+    sam_threshold: float,
+    nms_iou: float,
+    polygon_simplify_epsilon: float,
+    pic_id: Optional[str] = None,
+    query_names: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    if not query_images:
+        raise ValueError("At least one query image is required")
+
+    start_time = time.perf_counter()
+    normalized_pic_id = (pic_id or "").strip() or uuid.uuid4().hex[:16]
+    query_results: List[Dict[str, Any]] = []
+    lock_ctx = MODEL_LOCK if SERIALIZE_MODEL_ACCESS else contextlib.nullcontext()
+    autocast_ctx = _inference_autocast_context()
+    with torch.inference_mode(), lock_ctx, autocast_ctx:
+        sample_contexts = _prepare_multi_similar_reference_contexts(samples, top_k)
+        for index, query_image in enumerate(query_images):
+            query_pic_id = normalized_pic_id if len(query_images) == 1 else f"{normalized_pic_id}_{index + 1}"
+            one_result = _run_multi_native_visual_prompt_query(
+                sample_contexts,
+                query_image,
+                top_k,
+                similarity_threshold,
+                sam_threshold,
+                nms_iou,
+                polygon_simplify_epsilon,
+                query_pic_id,
+            )
+            if query_names and index < len(query_names):
+                one_result["query_name"] = query_names[index]
+            query_results.append(one_result)
+
+    if EMPTY_CUDA_CACHE_EACH_REQUEST and torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    total_processing_ms = int((time.perf_counter() - start_time) * 1000)
+    if len(query_results) == 1:
+        single = dict(query_results[0])
+        single["batch_size"] = 1
+        single["query_results"] = query_results
+        single["processing_time_ms"] = total_processing_ms
+        return single
+
+    return {
+        "model": MODEL_LABEL,
+        "pic_id": normalized_pic_id,
+        "success": True,
+        "similar_mode": "multi_visual_prompt",
+        "batch_size": len(query_results),
+        "query_results": query_results,
+        "num_samples": len(samples),
+        "top_k": int(top_k),
+        "top_k_scope": "per_category",
+        "similarity_threshold": float(similarity_threshold),
+        "sam_threshold": float(sam_threshold),
+        "nms_iou": float(nms_iou),
+        "total_num_matches": sum(int(item.get("num_matches", 0)) for item in query_results),
+        "total_num_candidates": sum(int(item.get("num_candidates", 0)) for item in query_results),
+        "sample_result_images": query_results[0].get("sample_result_images") if query_results else [],
         "reference_result_image": query_results[0].get("reference_result_image") if query_results else None,
         "created": int(time.time()),
         "processing_time_ms": total_processing_ms,
@@ -2668,6 +4147,99 @@ class SimilarObjectRequest(BaseModel):
 class ConcatPromptSegmentationRequest(SimilarObjectRequest):
     prompt: str = Field(..., min_length=1, description="Text prompt used with the reference box.")
     similar_mode: Literal["concat_prompt"] = Field(default="concat_prompt")
+
+
+class MultiSimilarInstanceRequest(BaseModel):
+    instance_id: Optional[str] = Field(default=None, max_length=128)
+    sample_type: Literal["positive", "negative"] = Field(
+        default="positive",
+        description="Whether this reference instance is a positive or negative sample",
+    )
+    is_negative: Optional[bool] = Field(default=None, description="Compatibility flag for negative samples")
+    category: str = Field(..., min_length=1, max_length=128, description="Target category mapped to this sample")
+    reference_bnd_points: List[float] = Field(
+        ...,
+        min_length=4,
+        max_length=4,
+        description="Sample object box [x, y, w, h] in reference image",
+    )
+    paste_bnd_points: Optional[List[float]] = Field(
+        default=None,
+        min_length=4,
+        max_length=4,
+        description="Optional larger paste region [x, y, w, h] in reference image",
+    )
+    prompt: Optional[str] = Field(default=None, max_length=256, description="Optional text prompt for box+prompt mode")
+
+
+class MultiSimilarSampleRequest(BaseModel):
+    sample_id: Optional[str] = Field(default=None, max_length=128)
+    reference_image_base64: str = Field(..., description="Base64 sample image string or data URL")
+    sample_type: Literal["positive", "negative"] = Field(
+        default="positive",
+        description="Whether this legacy single-instance reference is a positive or negative sample",
+    )
+    is_negative: Optional[bool] = Field(default=None, description="Compatibility flag for negative samples")
+    category: Optional[str] = Field(
+        default=None,
+        min_length=1,
+        max_length=128,
+        description="Target category for backward-compatible single-instance sample",
+    )
+    reference_bnd_points: Optional[List[float]] = Field(
+        default=None,
+        min_length=4,
+        max_length=4,
+        description="Single sample object box [x, y, w, h], kept for compatibility",
+    )
+    paste_bnd_points: Optional[List[float]] = Field(
+        default=None,
+        min_length=4,
+        max_length=4,
+        description="Optional larger paste region [x, y, w, h], kept for compatibility",
+    )
+    prompt: Optional[str] = Field(default=None, max_length=256, description="Optional single-instance text prompt")
+    instances: Optional[List[MultiSimilarInstanceRequest]] = Field(
+        default=None,
+        min_length=1,
+        description="Multiple target instances selected from this same sample image",
+    )
+
+    @model_validator(mode="after")
+    def validate_instances_or_legacy_box(self) -> "MultiSimilarSampleRequest":
+        if self.instances:
+            return self
+        if self.reference_bnd_points is None or not self.category:
+            raise ValueError("Each sample requires either instances[] or legacy category + reference_bnd_points")
+        return self
+
+
+class MultiSimilarObjectRequest(BaseModel):
+    pic_id: str = Field(..., min_length=1, max_length=128, description="Client image ID")
+    samples: List[MultiSimilarSampleRequest] = Field(..., min_length=1, max_length=20)
+    query_image_base64: Optional[str] = Field(
+        default=None,
+        description="Base64 query image string or data URL. Kept for single-image compatibility.",
+    )
+    query_image_base64_list: Optional[List[str]] = Field(
+        default=None,
+        description="Multiple base64 query image strings or data URLs.",
+    )
+    top_k: int = Field(default=5, ge=1, le=50, description="Max results kept per category after NMS")
+    similarity_threshold: float = Field(default=0.6, ge=-1.0, le=1.0)
+    sam_threshold: float = Field(default=0.2, ge=0.0, le=1.0)
+    nms_iou: float = Field(default=0.45, ge=0.0, le=1.0)
+    polygon_simplify_epsilon: float = Field(default=2.0, ge=0.0, le=50.0)
+
+    @model_validator(mode="after")
+    def normalize_query_images(self) -> "MultiSimilarObjectRequest":
+        if self.query_image_base64_list is None:
+            if self.query_image_base64 is None:
+                raise ValueError("Either query_image_base64 or query_image_base64_list is required")
+            self.query_image_base64_list = [self.query_image_base64]
+        elif len(self.query_image_base64_list) == 0:
+            raise ValueError("query_image_base64_list must contain at least one image")
+        return self
 
 
 class CreateApiKeyRequest(BaseModel):
@@ -2804,7 +4376,7 @@ async def create_segmentation(
 
     try:
         async with INFERENCE_SEMAPHORE:
-            result = await asyncio.to_thread(
+            result = await run_inference_in_thread(
                 run_detection_pipeline,
                 image,
                 payload.prompt,
@@ -2836,7 +4408,7 @@ async def create_box_segmentation(
 
     try:
         async with INFERENCE_SEMAPHORE:
-            result = await asyncio.to_thread(
+            result = await run_inference_in_thread(
                 run_box_segmentation_pipeline,
                 image,
                 payload.bnd_points,
@@ -2870,7 +4442,7 @@ async def create_similar_object_segmentation(
 
     try:
         async with INFERENCE_SEMAPHORE:
-            result = await asyncio.to_thread(
+            result = await run_inference_in_thread(
                 run_similar_object_batch_pipeline,
                 reference_image,
                 query_images,
@@ -2889,6 +4461,78 @@ async def create_similar_object_segmentation(
     except Exception as exc:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Similar object segmentation failed: {exc}") from exc
+
+    return result
+
+
+@app.post("/v1/multi-similar-object-segmentations")
+async def create_multi_similar_object_segmentation(
+    payload: MultiSimilarObjectRequest,
+    _: Dict[str, Any] = Depends(require_api_key),
+) -> Dict[str, Any]:
+    try:
+        samples: List[Dict[str, Any]] = []
+        for sample_index, sample in enumerate(payload.samples, start=1):
+            reference_image = decode_base64_image(sample.reference_image_base64)
+            image_sample_id = sample.sample_id or f"image_{sample_index}"
+            if sample.instances:
+                for instance_index, instance in enumerate(sample.instances, start=1):
+                    samples.append(
+                        {
+                            "sample_id": instance.instance_id or f"{image_sample_id}_inst_{instance_index}",
+                            "source_image_id": image_sample_id,
+                            "sample_type": "negative" if instance.is_negative is True else instance.sample_type,
+                            "is_negative": instance.is_negative is True or instance.sample_type == "negative",
+                            "category": instance.category,
+                            "reference_image": reference_image.copy(),
+                            "reference_bnd_points": instance.reference_bnd_points,
+                            "paste_bnd_points": instance.paste_bnd_points,
+                            "prompt": instance.prompt,
+                        }
+                    )
+            else:
+                samples.append(
+                    {
+                        "sample_id": image_sample_id,
+                        "source_image_id": image_sample_id,
+                        "sample_type": "negative" if sample.is_negative is True else sample.sample_type,
+                        "is_negative": sample.is_negative is True or sample.sample_type == "negative",
+                        "category": sample.category,
+                        "reference_image": reference_image,
+                        "reference_bnd_points": sample.reference_bnd_points,
+                        "paste_bnd_points": sample.paste_bnd_points,
+                        "prompt": sample.prompt,
+                    }
+                )
+        query_images = [decode_base64_image(item) for item in payload.query_image_base64_list or []]
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    if SAVE_UPLOADS:
+        for index, sample in enumerate(samples, start=1):
+            save_upload_image(sample["reference_image"], f"multi_similar_reference_input_{index}.jpg")
+        for index, query_image in enumerate(query_images, start=1):
+            save_upload_image(query_image, f"multi_similar_query_input_{index}.jpg")
+
+    try:
+        async with INFERENCE_SEMAPHORE:
+            result = await run_inference_in_thread(
+                run_multi_similar_object_batch_pipeline,
+                samples,
+                query_images,
+                payload.top_k,
+                payload.similarity_threshold,
+                payload.sam_threshold,
+                payload.nms_iou,
+                payload.polygon_simplify_epsilon,
+                payload.pic_id,
+                None,
+            )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Multi similar object segmentation failed: {exc}") from exc
 
     return result
 
@@ -2926,7 +4570,7 @@ async def detect_objects(
 
     try:
         async with INFERENCE_SEMAPHORE:
-            result = await asyncio.to_thread(
+            result = await run_inference_in_thread(
                 run_detection_pipeline,
                 image,
                 prompt,
@@ -2948,7 +4592,7 @@ async def detect_similar_objects(
     request: Request,
     reference_file: UploadFile = File(...),
     reference_bnd_points: str = Form(...),
-    prompt: str = Form(...),
+    prompt: Optional[str] = Form(default=None),
     top_k: int = Form(5),
     similarity_threshold: float = Form(0.6),
     sam_threshold: float = Form(0.2),
@@ -2994,6 +4638,8 @@ async def detect_similar_objects(
     if parsed_reference_bnd_points is None:
         raise HTTPException(status_code=400, detail="reference_bnd_points is required, format: x,y,w,h")
 
+    prompt_text = (prompt or "").strip() or None
+
     if SAVE_UPLOADS:
         save_upload_image(reference_image, reference_file.filename or "reference_upload.jpg")
         for index, query_image in enumerate(query_images):
@@ -3002,7 +4648,7 @@ async def detect_similar_objects(
 
     try:
         async with INFERENCE_SEMAPHORE:
-            result = await asyncio.to_thread(
+            result = await run_inference_in_thread(
                 run_similar_object_batch_pipeline,
                 reference_image,
                 query_images,
@@ -3014,13 +4660,151 @@ async def detect_similar_objects(
                 pic_id,
                 query_names,
                 similar_mode,
-                prompt,
+                prompt_text,
             )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Similar object detection failed: {exc}") from exc
+
+    return result
+
+
+@app.post("/multi-similar-detect")
+async def detect_multi_similar_objects(
+    request: Request,
+    sample_meta: str = Form(...),
+    top_k: int = Form(5),
+    similarity_threshold: float = Form(0.6),
+    sam_threshold: float = Form(0.2),
+    nms_iou: float = Form(0.45),
+    polygon_simplify_epsilon: float = Form(2.0),
+    pic_id: Optional[str] = Form(default=None),
+) -> Dict[str, Any]:
+    try:
+        form = await request.form()
+        parsed_meta = json.loads(sample_meta)
+        if not isinstance(parsed_meta, list) or not parsed_meta:
+            raise HTTPException(status_code=400, detail="sample_meta must be a non-empty JSON array")
+
+        sample_files = [
+            item
+            for item in form.getlist("sample_file")
+            if getattr(item, "filename", None) and hasattr(item, "read")
+        ]
+        query_files = [
+            item
+            for item in form.getlist("query_file")
+            if getattr(item, "filename", None) and hasattr(item, "read")
+        ]
+        if not sample_files:
+            raise HTTPException(status_code=400, detail="At least one sample image is required")
+        if not query_files:
+            raise HTTPException(status_code=400, detail="At least one query image is required")
+
+        sample_images: List[Image.Image] = []
+        for index, one_file in enumerate(sample_files, start=1):
+            sample_contents = await one_file.read()
+            if len(sample_contents) > MAX_IMAGE_BYTES:
+                raise HTTPException(status_code=400, detail=f"Sample image #{index} too large. Max bytes: {MAX_IMAGE_BYTES}")
+            sample_images.append(Image.open(io.BytesIO(sample_contents)).convert("RGB"))
+
+        samples: List[Dict[str, Any]] = []
+        for index, one_meta in enumerate(parsed_meta, start=1):
+            if not isinstance(one_meta, dict):
+                raise HTTPException(status_code=400, detail=f"sample_meta[{index - 1}] must be an object")
+            raw_file_index = one_meta.get("file_index", index - 1)
+            try:
+                file_index = int(raw_file_index)
+            except Exception as exc:
+                raise HTTPException(status_code=400, detail=f"sample_meta[{index - 1}].file_index must be an integer") from exc
+            if file_index < 0 or file_index >= len(sample_images):
+                raise HTTPException(status_code=400, detail=f"sample_meta[{index - 1}].file_index is out of range")
+
+            raw_bnd_points = one_meta.get("reference_bnd_points")
+            if isinstance(raw_bnd_points, str):
+                parsed_bnd_points = parse_optional_bnd_points_text(raw_bnd_points)
+            elif isinstance(raw_bnd_points, list):
+                parsed_bnd_points = [float(v) for v in raw_bnd_points]
+            else:
+                parsed_bnd_points = None
+            if parsed_bnd_points is None or len(parsed_bnd_points) != 4:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"sample_meta[{index - 1}].reference_bnd_points is required, format: x,y,w,h",
+                )
+            raw_paste_bnd_points = one_meta.get("paste_bnd_points")
+            if isinstance(raw_paste_bnd_points, str):
+                parsed_paste_bnd_points = parse_optional_bnd_points_text(raw_paste_bnd_points)
+            elif isinstance(raw_paste_bnd_points, list):
+                parsed_paste_bnd_points = [float(v) for v in raw_paste_bnd_points]
+            else:
+                parsed_paste_bnd_points = None
+
+            samples.append(
+                {
+                    "sample_id": one_meta.get("sample_id") or f"sample_{index}",
+                    "source_image_id": one_meta.get("source_image_id") or f"image_{file_index + 1}",
+                    "sample_type": one_meta.get("sample_type") or one_meta.get("role") or "positive",
+                    "is_negative": one_meta.get("is_negative") is True,
+                    "category": one_meta.get("category"),
+                    "reference_image": sample_images[file_index].copy(),
+                    "reference_bnd_points": parsed_bnd_points,
+                    "paste_bnd_points": parsed_paste_bnd_points,
+                    "prompt": one_meta.get("prompt"),
+                }
+            )
+
+        query_images: List[Image.Image] = []
+        query_names: List[str] = []
+        for index, one_file in enumerate(query_files, start=1):
+            query_contents = await one_file.read()
+            if len(query_contents) > MAX_IMAGE_BYTES:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Query image #{index} too large. Max bytes: {MAX_IMAGE_BYTES}",
+                )
+            query_images.append(Image.open(io.BytesIO(query_contents)).convert("RGB"))
+            query_names.append(one_file.filename or f"query_upload_{index}.jpg")
+    except HTTPException:
+        raise
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid sample_meta JSON: {exc}") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid multi-similar upload payload: {exc}") from exc
+
+    if SAVE_UPLOADS:
+        saved_source_ids = set()
+        for sample in samples:
+            source_image_id = sample.get("source_image_id") or sample.get("sample_id") or "sample"
+            if source_image_id in saved_source_ids:
+                continue
+            saved_source_ids.add(source_image_id)
+            save_upload_image(sample["reference_image"], f"multi_reference_upload_{source_image_id}.jpg")
+        for index, query_image in enumerate(query_images):
+            query_name = query_names[index] if index < len(query_names) else f"query_upload_{index + 1}.jpg"
+            save_upload_image(query_image, query_name)
+
+    try:
+        async with INFERENCE_SEMAPHORE:
+            result = await run_inference_in_thread(
+                run_multi_similar_object_batch_pipeline,
+                samples,
+                query_images,
+                top_k,
+                similarity_threshold,
+                sam_threshold,
+                nms_iou,
+                polygon_simplify_epsilon,
+                pic_id,
+                query_names,
+            )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Multi similar object detection failed: {exc}") from exc
 
     return result
 
@@ -3118,14 +4902,30 @@ async def index() -> HTMLResponse:
 
 @app.get("/health")
 async def health_check() -> Dict[str, Any]:
+    with INFERENCE_STATE_LOCK:
+        active_inferences = ACTIVE_INFERENCE_COUNT
+        last_finished_at = LAST_INFERENCE_FINISHED_AT
+        idle_model_unloaded = IDLE_MODEL_UNLOADED
+
+    idle_seconds = None
+    if last_finished_at > 0 and active_inferences == 0:
+        idle_seconds = int(time.monotonic() - last_finished_at)
+
     return {
         "status": "healthy",
         "model": MODEL_LABEL,
         "device": device,
+        "model_loaded": getattr(predictor, "model", None) is not None,
+        "active_inferences": active_inferences,
+        "idle_seconds": idle_seconds,
+        "idle_model_unloaded": idle_model_unloaded,
         "max_concurrent_inferences": MAX_CONCURRENT_INFERENCES,
         "model_access_mode": "serialized" if SERIALIZE_MODEL_ACCESS else "parallel",
         "backend": "ultralytics",
         "ultralytics_imgsz": ULTRALYTICS_IMGSZ,
+        "cuda_cleanup_after_request": CUDA_CLEANUP_AFTER_REQUEST,
+        "idle_model_unload_seconds": IDLE_MODEL_UNLOAD_SECONDS,
+        "cuda_memory": get_cuda_memory_stats(),
     }
 
 

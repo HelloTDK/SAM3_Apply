@@ -355,6 +355,134 @@
             border-radius: 10px;
             margin-top: 15px;
             box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1);
+            cursor: zoom-in;
+        }
+
+        .image-zoom-overlay {
+            position: fixed;
+            inset: 0;
+            background: rgba(15, 23, 42, 0.86);
+            z-index: 9999;
+            display: none;
+            align-items: center;
+            justify-content: center;
+            padding: 24px;
+        }
+
+        .image-zoom-overlay.annotation-mode {
+            align-items: stretch;
+            flex-direction: column;
+        }
+
+        .image-zoom-overlay.show {
+            display: flex;
+        }
+
+        .image-zoom-stage {
+            position: relative;
+            display: inline-block;
+            max-width: 96vw;
+            max-height: 92vh;
+        }
+
+        .annotation-mode .image-zoom-stage {
+            margin: 64px auto 24px;
+            max-height: calc(100vh - 112px);
+        }
+
+        .image-zoom-content {
+            max-width: 96vw;
+            max-height: 92vh;
+            border-radius: 8px;
+            background: #fff;
+            box-shadow: 0 16px 60px rgba(0, 0, 0, 0.45);
+            cursor: zoom-out;
+            display: block;
+        }
+
+        .annotation-mode .image-zoom-content {
+            max-height: calc(100vh - 112px);
+            cursor: crosshair;
+        }
+
+        .image-zoom-canvas {
+            position: absolute;
+            left: 0;
+            top: 0;
+            display: none;
+            cursor: crosshair;
+        }
+
+        .annotation-mode .image-zoom-canvas {
+            display: block;
+        }
+
+        .image-zoom-toolbar {
+            position: fixed;
+            top: 16px;
+            left: 24px;
+            right: 76px;
+            display: none;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            color: #fff;
+            font-size: 0.95em;
+            line-height: 1.5;
+        }
+
+        .annotation-mode .image-zoom-toolbar {
+            display: flex;
+        }
+
+        .image-zoom-title {
+            font-weight: 700;
+        }
+
+        .image-zoom-help {
+            color: rgba(255, 255, 255, 0.82);
+            text-align: right;
+        }
+
+        .annotation-label-picker {
+            position: fixed;
+            right: 24px;
+            bottom: 24px;
+            width: min(320px, calc(100vw - 48px));
+            background: #fff;
+            border-radius: 10px;
+            padding: 14px;
+            box-shadow: 0 16px 60px rgba(0, 0, 0, 0.35);
+            display: none;
+            z-index: 10000;
+        }
+
+        .annotation-label-picker.show {
+            display: block;
+        }
+
+        .annotation-label-picker label {
+            font-size: 0.95em;
+            margin-bottom: 8px;
+        }
+
+        .annotation-label-picker select {
+            margin-bottom: 10px;
+        }
+
+        .image-zoom-close {
+            position: fixed;
+            top: 18px;
+            right: 20px;
+            width: 40px;
+            height: 40px;
+            border-radius: 999px;
+            border: 1px solid rgba(255, 255, 255, 0.4);
+            background: rgba(255, 255, 255, 0.16);
+            color: #fff;
+            font-size: 24px;
+            line-height: 1;
+            cursor: pointer;
         }
 
         .preview-grid {
@@ -419,6 +547,106 @@
         .draw-tip {
             font-size: 0.9em;
             color: #666;
+        }
+
+        .sample-list {
+            display: grid;
+            gap: 14px;
+        }
+
+        .sample-card {
+            background: #fff;
+            border: 1px solid #e5e7eb;
+            border-radius: 10px;
+            padding: 14px;
+        }
+
+        .sample-card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 12px;
+        }
+
+        .sample-card-title {
+            color: #344054;
+            font-weight: 700;
+        }
+
+        .sample-card .draw-wrap {
+            max-height: 260px;
+            overflow: hidden;
+        }
+
+        .instance-list {
+            display: grid;
+            gap: 10px;
+        }
+
+        .instance-row {
+            border: 1px solid #e5e7eb;
+            border-radius: 8px;
+            padding: 10px;
+            background: #f8fafc;
+        }
+
+        .instance-row.active-instance {
+            border-color: #0f766e;
+            box-shadow: 0 0 0 2px rgba(15, 118, 110, 0.12);
+        }
+
+        .instance-row.negative-instance {
+            border-color: #fecaca;
+            background: #fff7f7;
+        }
+
+        .instance-row.negative-instance.active-instance {
+            border-color: #dc2626;
+            box-shadow: 0 0 0 2px rgba(220, 38, 38, 0.12);
+        }
+
+        .mode-toggle-row {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+
+        .label-builder {
+            display: grid;
+            grid-template-columns: 1fr auto;
+            gap: 10px;
+            align-items: center;
+            margin-bottom: 12px;
+        }
+
+        .label-list {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin: 8px 0 16px;
+        }
+
+        .label-chip {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 6px 10px;
+            border-radius: 999px;
+            background: #eef2ff;
+            color: #3730a3;
+            font-size: 0.9em;
+            font-weight: 600;
+        }
+
+        .label-chip button {
+            border: none;
+            background: transparent;
+            color: #4f46e5;
+            cursor: pointer;
+            font-size: 1em;
+            line-height: 1;
         }
 
         .result-images {
@@ -584,15 +812,43 @@
                 </div>
 
                 <div class="form-group">
-                    <label for="referenceBndPoints">📦 示例目标框（必填）</label>
-                    <input type="text" id="referenceBndPoints" name="reference_bnd_points" required placeholder="必须填写 x,y,w,h，例如 120,80,260,300">
-                    <p class="hint">请输入示例目标的像素框坐标：x,y,w,h。</p>
+                    <div class="mode-toggle-row">
+                        <label style="margin:0;">
+                            <input type="checkbox" id="multiSampleToggle">
+                            多样例多类别原生识别模式
+                        </label>
+                        <button type="button" class="small-btn" id="addSampleBtn" style="display:none;">添加样例</button>
+                    </div>
+                    <p class="hint">开启后，可一次上传多张样例图，先构建标签，再点击样例图放大后连续标注正/负样本框，并提交到多样例原生 visual prompt 接口；关闭时使用原单样例流程。</p>
                 </div>
 
-                <div class="form-group" id="similarPromptGroup">
-                    <label for="similarPromptText">🔤 相似目标文本描述</label>
-                    <input type="text" id="similarPromptText" name="prompt" placeholder="例如：红色安全帽、白色车辆、穿反光背心的人">
-                    <p class="hint">可选；拼接模式填写后会和示例框一起传给 SAM3。</p>
+                <div id="singleSampleFields">
+                    <div class="form-group">
+                        <label for="referenceBndPoints">📦 示例目标框（必填）</label>
+                        <input type="text" id="referenceBndPoints" name="reference_bnd_points" required placeholder="必须填写 x,y,w,h，例如 120,80,260,300">
+                        <p class="hint">请输入示例目标的像素框坐标：x,y,w,h。</p>
+                    </div>
+
+                    <div class="form-group" id="similarPromptGroup">
+                        <label for="similarPromptText">🔤 相似目标文本描述</label>
+                        <input type="text" id="similarPromptText" name="prompt" placeholder="例如：红色安全帽、白色车辆、穿反光背心的人">
+                        <p class="hint">可选；拼接模式填写后会和示例框一起传给 SAM3。</p>
+                    </div>
+                </div>
+
+                <div class="form-group" id="multiSampleFields" style="display:none;">
+                    <label>🧩 多类别样例</label>
+                    <div class="label-builder">
+                        <input type="text" id="labelNameInput" placeholder="输入标签名称，例如：安全帽、车辆、人员">
+                        <button type="button" class="small-btn" id="addLabelBtn">构建标签</button>
+                    </div>
+                    <div id="labelList" class="label-list"></div>
+                    <div class="form-group">
+                        <label for="multiSampleImageFiles">样例图片（可多选）</label>
+                        <input type="file" id="multiSampleImageFiles" accept="image/*" multiple>
+                        <p class="hint">选择多张图片后会自动生成多个样例卡片；也可以继续点击“添加样例”手动补充。</p>
+                    </div>
+                    <div id="sampleList" class="sample-list"></div>
                 </div>
 
                 <div class="two-col">
@@ -605,7 +861,7 @@
                         <select id="similarMode" name="similar_mode">
                             <option value="same_image_prompt">同图拉框 + SAM3 原生 visual prompt</option>
                             <option value="concat_prompt">拼接图 + SAM3 visual prompt</option>
-                            <option value="feature_match">特征粗检 + SAM3 精分割</option>
+                            <option value="feature_match">跨图原生 visual prompt</option>
                         </select>
                     </div>
                 </div>
@@ -673,11 +929,11 @@
             <div class="result-info" id="resultInfo"></div>
             <div class="result-images">
                 <div>
-                    <div class="hint">示例目标分割结果（SAM+box）</div>
+                    <div class="hint" id="referenceResultTitle">示例目标分割结果（SAM+box）</div>
                     <img id="referenceResultImage" class="preview-image" alt="样图识别结果" style="display:none;">
                 </div>
                 <div>
-                    <div class="hint">图2相似目标比对结果</div>
+                    <div class="hint" id="resultImageTitle">图2相似目标比对结果</div>
                     <img id="resultImage" class="preview-image" alt="比对结果" style="display:none;">
                 </div>
             </div>
@@ -686,6 +942,34 @@
                 <div id="concatDebugImages" class="preview-section"></div>
             </div>
             <div id="queryResultsList" class="preview-section"></div>
+        </div>
+    </div>
+
+    <div class="image-zoom-overlay" id="imageZoomOverlay" aria-hidden="true">
+        <div class="image-zoom-toolbar" id="imageZoomToolbar">
+            <div>
+                <div class="image-zoom-title" id="imageZoomTitle">放大查看</div>
+                <div id="imageZoomMeta"></div>
+            </div>
+            <div class="image-zoom-help">鼠标左键拖框；拉框后选择正/负样本和标签，可连续标注，样本类型默认沿用上一次选择。</div>
+        </div>
+        <button type="button" class="image-zoom-close" id="imageZoomClose" aria-label="关闭">×</button>
+        <div class="image-zoom-stage" id="imageZoomStage">
+            <img class="image-zoom-content" id="imageZoomContent" alt="放大查看">
+            <canvas class="image-zoom-canvas" id="imageZoomCanvas"></canvas>
+        </div>
+        <div class="annotation-label-picker" id="annotationLabelPicker">
+            <label for="annotationSampleTypeSelect">样本类型</label>
+            <select id="annotationSampleTypeSelect">
+                <option value="positive">正样本</option>
+                <option value="negative">负样本</option>
+            </select>
+            <label for="annotationLabelSelect">选择标签</label>
+            <select id="annotationLabelSelect"></select>
+            <div class="draw-actions" style="justify-content:flex-end; margin-top:12px;">
+                <button type="button" class="small-btn" id="annotationLabelCancel">取消</button>
+                <button type="button" class="small-btn" id="annotationLabelConfirm">确认</button>
+            </div>
         </div>
     </div>
 
@@ -701,6 +985,15 @@
         const referenceDrawImage = document.getElementById('referenceDrawImage');
         const referenceDrawCanvas = document.getElementById('referenceDrawCanvas');
         const clearReferenceBoxBtn = document.getElementById('clearReferenceBoxBtn');
+        const multiSampleToggle = document.getElementById('multiSampleToggle');
+        const singleSampleFields = document.getElementById('singleSampleFields');
+        const multiSampleFields = document.getElementById('multiSampleFields');
+        const sampleList = document.getElementById('sampleList');
+        const addSampleBtn = document.getElementById('addSampleBtn');
+        const labelNameInput = document.getElementById('labelNameInput');
+        const addLabelBtn = document.getElementById('addLabelBtn');
+        const labelList = document.getElementById('labelList');
+        const multiSampleImageFiles = document.getElementById('multiSampleImageFiles');
         const queryPreview = document.getElementById('queryPreview');
         const similarSubmitBtn = document.getElementById('similarSubmitBtn');
         const similarSamThreshold = document.getElementById('similarSamThreshold');
@@ -711,7 +1004,9 @@
         const error = document.getElementById('error');
         const resultSection = document.getElementById('resultSection');
         const resultInfo = document.getElementById('resultInfo');
+        const referenceResultTitle = document.getElementById('referenceResultTitle');
         const referenceResultImage = document.getElementById('referenceResultImage');
+        const resultImageTitle = document.getElementById('resultImageTitle');
         const resultImage = document.getElementById('resultImage');
         const concatDebugSection = document.getElementById('concatDebugSection');
         const concatDebugImages = document.getElementById('concatDebugImages');
@@ -723,6 +1018,19 @@
         const createKeyBtn = document.getElementById('createKeyBtn');
         const newKeyOutput = document.getElementById('newKeyOutput');
         const keysList = document.getElementById('keysList');
+        const imageZoomOverlay = document.getElementById('imageZoomOverlay');
+        const imageZoomStage = document.getElementById('imageZoomStage');
+        const imageZoomContent = document.getElementById('imageZoomContent');
+        const imageZoomCanvas = document.getElementById('imageZoomCanvas');
+        const imageZoomToolbar = document.getElementById('imageZoomToolbar');
+        const imageZoomTitle = document.getElementById('imageZoomTitle');
+        const imageZoomMeta = document.getElementById('imageZoomMeta');
+        const imageZoomClose = document.getElementById('imageZoomClose');
+        const annotationLabelPicker = document.getElementById('annotationLabelPicker');
+        const annotationSampleTypeSelect = document.getElementById('annotationSampleTypeSelect');
+        const annotationLabelSelect = document.getElementById('annotationLabelSelect');
+        const annotationLabelConfirm = document.getElementById('annotationLabelConfirm');
+        const annotationLabelCancel = document.getElementById('annotationLabelCancel');
         const PLAIN_KEYS_STORAGE = 'sam3_plain_api_keys_v1';
         let plainKeysMap = {};
 
@@ -741,6 +1049,71 @@
             if (Number.isNaN(d.getTime())) return isoString;
             return d.toLocaleString();
         }
+
+        let imageZoomMode = 'view';
+        let activeAnnotationState = null;
+        let pendingAnnotation = null;
+        const annotationDrawState = {
+            drawing: false,
+            startX: 0,
+            startY: 0,
+        };
+        let lastAnnotationSampleType = 'positive';
+        let lastAnnotationLabel = '';
+
+        function openImageZoom(src, altText = '') {
+            if (!src) return;
+            imageZoomMode = 'view';
+            activeAnnotationState = null;
+            pendingAnnotation = null;
+            annotationLabelPicker.classList.remove('show');
+            imageZoomOverlay.classList.remove('annotation-mode');
+            imageZoomContent.onload = null;
+            imageZoomContent.src = src;
+            imageZoomContent.alt = altText || '放大查看';
+            imageZoomOverlay.classList.add('show');
+            imageZoomOverlay.setAttribute('aria-hidden', 'false');
+            imageZoomCanvas.width = 0;
+            imageZoomCanvas.height = 0;
+        }
+
+        function closeImageZoom() {
+            imageZoomOverlay.classList.remove('show');
+            imageZoomOverlay.classList.remove('annotation-mode');
+            imageZoomOverlay.setAttribute('aria-hidden', 'true');
+            imageZoomContent.removeAttribute('src');
+            annotationLabelPicker.classList.remove('show');
+            imageZoomMode = 'view';
+            activeAnnotationState = null;
+            pendingAnnotation = null;
+            annotationDrawState.drawing = false;
+        }
+
+        document.addEventListener('click', function(e) {
+            const img = e.target.closest('img.preview-image');
+            if (!img || !img.src) return;
+            openImageZoom(img.src, img.alt);
+        });
+
+        imageZoomOverlay.addEventListener('click', function(e) {
+            if (imageZoomMode === 'annotate') {
+                if (e.target === imageZoomOverlay) {
+                    closeImageZoom();
+                }
+                return;
+            }
+            if (e.target === imageZoomOverlay || e.target === imageZoomContent) {
+                closeImageZoom();
+            }
+        });
+
+        imageZoomClose.addEventListener('click', closeImageZoom);
+
+        document.addEventListener('keydown', function(e) {
+            if (e.key === 'Escape' && imageZoomOverlay.classList.contains('show')) {
+                closeImageZoom();
+            }
+        });
 
         function loadPlainKeysMap() {
             try {
@@ -1005,7 +1378,8 @@
         bindMultiImagePreview(queryImageFile, queryPreview);
 
         function updateSimilarModeUi() {
-            const isSameImageMode = similarModeSelect.value === 'same_image_prompt';
+            const isMultiSampleMode = multiSampleToggle.checked;
+            const isSameImageMode = !isMultiSampleMode && similarModeSelect.value === 'same_image_prompt';
             const queryGroup = queryImageFile.closest('.form-group');
             if (queryGroup) {
                 queryGroup.style.display = isSameImageMode ? 'none' : '';
@@ -1168,8 +1542,790 @@
             drawReferenceBoxOverlay();
         });
 
+        let sampleCounter = 0;
+        const sampleStates = new Map();
+        const POSITIVE_SAMPLE_COLOR = '#0f766e';
+        const POSITIVE_SAMPLE_FILL = 'rgba(15, 118, 110, 0.14)';
+        const NEGATIVE_SAMPLE_COLOR = '#dc2626';
+        const NEGATIVE_SAMPLE_FILL = 'rgba(220, 38, 38, 0.14)';
+        let labelCounter = 0;
+        const labelStates = [];
+
+        function normalizeLabelName(raw) {
+            return String(raw || '').trim();
+        }
+
+        function buildLabelOptionHtml(selectedValue = '') {
+            if (!labelStates.length) {
+                return '<option value="">请先构建标签</option>';
+            }
+            return [
+                '<option value="">选择标签</option>',
+                ...labelStates.map((item) => {
+                    const selected = item.name === selectedValue ? ' selected' : '';
+                    return `<option value="${escapeHtml(item.name)}"${selected}>${escapeHtml(item.name)}</option>`;
+                })
+            ].join('');
+        }
+
+        function getDefaultAnnotationLabel() {
+            if (lastAnnotationLabel && labelStates.some((item) => item.name === lastAnnotationLabel)) {
+                return lastAnnotationLabel;
+            }
+            return labelStates.length ? labelStates[0].name : '';
+        }
+
+        function updateAllInstanceCategorySelects() {
+            sampleStates.forEach((state) => {
+                state.instances.forEach((instance) => {
+                    const current = instance.categoryInput.value;
+                    instance.categoryInput.innerHTML = buildLabelOptionHtml(current);
+                    if (current && labelStates.some((item) => item.name === current)) {
+                        instance.categoryInput.value = current;
+                    }
+                });
+                drawSampleBoxOverlay(state);
+            });
+            refreshAnnotationLabelSelect();
+        }
+
+        function renderLabelList() {
+            if (!labelStates.length) {
+                labelList.innerHTML = '<span class="hint">暂无标签，请先构建标签。</span>';
+                return;
+            }
+            labelList.innerHTML = labelStates.map((item) => `
+                <span class="label-chip" data-label-id="${escapeHtml(item.id)}">
+                    ${escapeHtml(item.name)}
+                    <button type="button" data-action="remove-label" aria-label="删除标签 ${escapeHtml(item.name)}">×</button>
+                </span>
+            `).join('');
+        }
+
+        function addLabel(name) {
+            const normalized = normalizeLabelName(name);
+            if (!normalized) {
+                alert('请输入标签名称');
+                return;
+            }
+            if (labelStates.some((item) => item.name === normalized)) {
+                alert('标签已存在');
+                return;
+            }
+            labelCounter += 1;
+            labelStates.push({ id: `label_${labelCounter}`, name: normalized });
+            labelNameInput.value = '';
+            renderLabelList();
+            updateAllInstanceCategorySelects();
+        }
+
+        function refreshAnnotationLabelSelect(selectedValue = '') {
+            const effectiveValue = selectedValue || getDefaultAnnotationLabel();
+            annotationLabelSelect.innerHTML = buildLabelOptionHtml(effectiveValue);
+            if (effectiveValue) {
+                annotationLabelSelect.value = effectiveValue;
+            }
+        }
+
+        addLabelBtn.addEventListener('click', function() {
+            addLabel(labelNameInput.value);
+        });
+
+        labelNameInput.addEventListener('keydown', function(e) {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                addLabel(labelNameInput.value);
+            }
+        });
+
+        labelList.addEventListener('click', function(e) {
+            const btn = e.target.closest('button[data-action="remove-label"]');
+            if (!btn) return;
+            const chip = btn.closest('.label-chip');
+            if (!chip) return;
+            const labelId = chip.getAttribute('data-label-id');
+            const index = labelStates.findIndex((item) => item.id === labelId);
+            if (index < 0) return;
+            const removed = labelStates[index].name;
+            labelStates.splice(index, 1);
+            if (lastAnnotationLabel === removed) {
+                lastAnnotationLabel = '';
+            }
+            sampleStates.forEach((state) => {
+                state.instances.forEach((instance) => {
+                    if (instance.categoryInput.value === removed) {
+                        instance.categoryInput.value = '';
+                    }
+                });
+            });
+            renderLabelList();
+            updateAllInstanceCategorySelects();
+        });
+
+        renderLabelList();
+
+        function getSamplePointerPosition(canvas, evt) {
+            const rect = canvas.getBoundingClientRect();
+            return { x: evt.clientX - rect.left, y: evt.clientY - rect.top };
+        }
+
+        function drawSampleBoxOverlay(state, tempEnd = null) {
+            const ctx = state.canvas.getContext('2d');
+            const displayW = state.canvas.width;
+            const displayH = state.canvas.height;
+            ctx.clearRect(0, 0, displayW, displayH);
+
+            const sx = displayW / Math.max(1, state.image.naturalWidth);
+            const sy = displayH / Math.max(1, state.image.naturalHeight);
+            state.instances.forEach((instance, index) => {
+                const isActive = instance.id === state.activeInstanceId;
+                const isNegative = instance.sampleTypeSelect && instance.sampleTypeSelect.value === 'negative';
+                const targetColor = isNegative ? NEGATIVE_SAMPLE_COLOR : POSITIVE_SAMPLE_COLOR;
+                const targetFill = isNegative ? NEGATIVE_SAMPLE_FILL : POSITIVE_SAMPLE_FILL;
+                if (instance.pasteBox) {
+                    const pasteBox = {
+                        x: instance.pasteBox.x * sx,
+                        y: instance.pasteBox.y * sy,
+                        w: instance.pasteBox.w * sx,
+                        h: instance.pasteBox.h * sy,
+                    };
+                    if (pasteBox.w >= 1 && pasteBox.h >= 1) {
+                        ctx.save();
+                        ctx.setLineDash([6, 4]);
+                        ctx.strokeStyle = isActive && state.activeDrawKind === 'paste' ? '#f97316' : '#f59e0b';
+                        ctx.lineWidth = isActive && state.activeDrawKind === 'paste' ? 3 : 2;
+                        ctx.fillStyle = 'rgba(249, 115, 22, 0.08)';
+                        ctx.strokeRect(pasteBox.x, pasteBox.y, pasteBox.w, pasteBox.h);
+                        ctx.fillRect(pasteBox.x, pasteBox.y, pasteBox.w, pasteBox.h);
+                        ctx.restore();
+                    }
+                }
+                if (instance.box) {
+                    const drawBox = {
+                        x: instance.box.x * sx,
+                        y: instance.box.y * sy,
+                        w: instance.box.w * sx,
+                        h: instance.box.h * sy,
+                    };
+                    if (drawBox.w < 1 || drawBox.h < 1) return;
+                    ctx.strokeStyle = targetColor;
+                    ctx.lineWidth = isActive && state.activeDrawKind === 'target' ? 3 : 2;
+                    ctx.fillStyle = targetFill;
+                    ctx.strokeRect(drawBox.x, drawBox.y, drawBox.w, drawBox.h);
+                    ctx.fillRect(drawBox.x, drawBox.y, drawBox.w, drawBox.h);
+                    ctx.fillStyle = targetColor;
+                    ctx.fillRect(drawBox.x, Math.max(0, drawBox.y - 20), 44, 18);
+                    ctx.fillStyle = '#fff';
+                    ctx.font = '12px sans-serif';
+                    ctx.fillText(`${isNegative ? 'N' : 'P'}${index + 1}`, drawBox.x + 7, Math.max(13, drawBox.y - 7));
+                }
+            });
+
+            if (tempEnd) {
+                const x1 = Math.min(state.startX, tempEnd.x);
+                const y1 = Math.min(state.startY, tempEnd.y);
+                const x2 = Math.max(state.startX, tempEnd.x);
+                const y2 = Math.max(state.startY, tempEnd.y);
+                const drawBox = { x: x1, y: y1, w: x2 - x1, h: y2 - y1 };
+                if (drawBox.w < 1 || drawBox.h < 1) return;
+                const activeInstance = getActiveSampleInstance(state);
+                const isNegative = activeInstance && activeInstance.sampleTypeSelect && activeInstance.sampleTypeSelect.value === 'negative';
+                ctx.strokeStyle = state.activeDrawKind === 'paste' ? '#f97316' : (isNegative ? NEGATIVE_SAMPLE_COLOR : POSITIVE_SAMPLE_COLOR);
+                ctx.lineWidth = 2;
+                ctx.fillStyle = state.activeDrawKind === 'paste'
+                    ? 'rgba(249, 115, 22, 0.14)'
+                    : (isNegative ? NEGATIVE_SAMPLE_FILL : POSITIVE_SAMPLE_FILL);
+                ctx.strokeRect(drawBox.x, drawBox.y, drawBox.w, drawBox.h);
+                ctx.fillRect(drawBox.x, drawBox.y, drawBox.w, drawBox.h);
+            }
+        }
+
+        function getActiveSampleInstance(state) {
+            return state.instances.find((instance) => instance.id === state.activeInstanceId) || state.instances[0] || null;
+        }
+
+        function syncSampleBoxInput(instance) {
+            if (!instance.box) {
+                instance.boxInput.value = '';
+                return;
+            }
+            const { x, y, w, h } = instance.box;
+            instance.boxInput.value = `${Math.round(x)},${Math.round(y)},${Math.round(w)},${Math.round(h)}`;
+        }
+
+        function syncSamplePasteBoxInput(instance) {
+            if (!instance.pasteBox) {
+                instance.pasteBoxInput.value = '';
+                return;
+            }
+            const { x, y, w, h } = instance.pasteBox;
+            instance.pasteBoxInput.value = `${Math.round(x)},${Math.round(y)},${Math.round(w)},${Math.round(h)}`;
+        }
+
+        function resizeSampleCanvas(state) {
+            if (!state.image.src) return;
+            const displayW = state.image.clientWidth;
+            const displayH = state.image.clientHeight;
+            if (!displayW || !displayH) return;
+            state.canvas.width = displayW;
+            state.canvas.height = displayH;
+            drawSampleBoxOverlay(state);
+        }
+
+        function clearSampleBox(state) {
+            const instance = getActiveSampleInstance(state);
+            if (!instance) return;
+            if (state.activeDrawKind === 'paste') {
+                instance.pasteBox = null;
+                syncSamplePasteBoxInput(instance);
+            } else {
+                instance.box = null;
+                syncSampleBoxInput(instance);
+            }
+            drawSampleBoxOverlay(state);
+        }
+
+        function refreshSampleTitles() {
+            Array.from(sampleList.querySelectorAll('.sample-card')).forEach((card, index) => {
+                const title = card.querySelector('.sample-card-title');
+                if (title) title.textContent = `样例 #${index + 1}`;
+            });
+        }
+
+        function setActiveSampleInstance(state, instanceId, drawKind = 'target') {
+            state.activeInstanceId = instanceId;
+            state.activeDrawKind = drawKind;
+            state.instances.forEach((instance) => {
+                instance.row.classList.toggle('active-instance', instance.id === instanceId);
+            });
+            drawSampleBoxOverlay(state);
+        }
+
+        function addSampleInstance(state, initialData = {}) {
+            const instanceId = `${state.id}_inst_${state.instanceCounter + 1}`;
+            state.instanceCounter += 1;
+            const row = document.createElement('div');
+            row.className = 'instance-row';
+            row.dataset.instanceId = instanceId;
+            row.innerHTML = `
+                <div class="sample-card-header" style="margin-bottom:10px;">
+                    <div class="sample-card-title">实例 #${state.instances.length + 1}</div>
+                    <div class="draw-actions" style="margin:0;">
+                        <button type="button" class="small-btn" data-action="select-target-box">画目标框</button>
+                        <button type="button" class="small-btn" data-action="select-paste-box">画粘贴区域</button>
+                        <button type="button" class="small-btn" data-action="remove-instance">删除实例</button>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label>样本类型</label>
+                    <select data-role="instance-sample-type">
+                        <option value="positive">正样本</option>
+                        <option value="negative">负样本</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>标签</label>
+                    <select data-role="instance-category">${buildLabelOptionHtml(initialData.category || '')}</select>
+                </div>
+                <div class="form-group">
+                    <label>样例目标框</label>
+                    <input type="text" data-role="instance-box" placeholder="x,y,w,h">
+                </div>
+                <div class="form-group">
+                    <label>粘贴区域框</label>
+                    <input type="text" data-role="instance-paste-box" placeholder="可选；不填则默认粘贴单一目标">
+                </div>
+                <div class="form-group">
+                    <label>文本描述</label>
+                    <input type="text" data-role="instance-prompt" placeholder="可选；填写后使用 box + prompt">
+                </div>
+            `;
+            const emptyHint = state.instanceList.querySelector('[data-role="empty-instance-hint"]');
+            if (emptyHint) {
+                emptyHint.remove();
+            }
+            state.instanceList.appendChild(row);
+            const instance = {
+                id: instanceId,
+                row,
+                sampleTypeSelect: row.querySelector('[data-role="instance-sample-type"]'),
+                categoryInput: row.querySelector('[data-role="instance-category"]'),
+                boxInput: row.querySelector('[data-role="instance-box"]'),
+                pasteBoxInput: row.querySelector('[data-role="instance-paste-box"]'),
+                promptInput: row.querySelector('[data-role="instance-prompt"]'),
+                box: null,
+                pasteBox: null,
+            };
+            instance.sampleTypeSelect.value = initialData.sampleType === 'negative' ? 'negative' : 'positive';
+            instance.categoryInput.value = initialData.category || '';
+            if (initialData.box) {
+                instance.box = { ...initialData.box };
+            }
+            if (initialData.pasteBox) {
+                instance.pasteBox = { ...initialData.pasteBox };
+            }
+            if (initialData.prompt) {
+                instance.promptInput.value = initialData.prompt;
+            }
+            row.classList.toggle('negative-instance', instance.sampleTypeSelect.value === 'negative');
+            instance.sampleTypeSelect.addEventListener('change', function() {
+                row.classList.toggle('negative-instance', instance.sampleTypeSelect.value === 'negative');
+                drawSampleBoxOverlay(state);
+            });
+            instance.categoryInput.addEventListener('change', function() {
+                drawSampleBoxOverlay(state);
+            });
+            instance.boxInput.addEventListener('input', function() {
+                const parsed = parseBoxText(instance.boxInput.value);
+                instance.box = parsed ? { x: parsed[0], y: parsed[1], w: parsed[2], h: parsed[3] } : null;
+                drawSampleBoxOverlay(state);
+            });
+            instance.pasteBoxInput.addEventListener('input', function() {
+                const parsed = parseBoxText(instance.pasteBoxInput.value);
+                instance.pasteBox = parsed ? { x: parsed[0], y: parsed[1], w: parsed[2], h: parsed[3] } : null;
+                drawSampleBoxOverlay(state);
+            });
+            state.instances.push(instance);
+            syncSampleBoxInput(instance);
+            syncSamplePasteBoxInput(instance);
+            refreshSampleInstanceTitles(state);
+            setActiveSampleInstance(state, instanceId, 'target');
+            return instance;
+        }
+
+        function refreshSampleInstanceTitles(state) {
+            const emptyHint = state.instanceList.querySelector('[data-role="empty-instance-hint"]');
+            if (!state.instances.length) {
+                if (!emptyHint) {
+                    state.instanceList.innerHTML = '<div class="hint" data-role="empty-instance-hint">暂无实例。点击样例图放大标注，或手动添加实例。</div>';
+                }
+                return;
+            }
+            if (emptyHint) {
+                emptyHint.remove();
+            }
+            state.instances.forEach((instance, index) => {
+                const title = instance.row.querySelector('.sample-card-title');
+                if (title) title.textContent = `实例 #${index + 1}`;
+            });
+        }
+
+        function getAnnotationPointerPosition(evt) {
+            const rect = imageZoomCanvas.getBoundingClientRect();
+            return { x: evt.clientX - rect.left, y: evt.clientY - rect.top };
+        }
+
+        function drawAnnotationZoomOverlay(tempEnd = null) {
+            if (!activeAnnotationState || imageZoomMode !== 'annotate') return;
+            const state = activeAnnotationState;
+            const ctx = imageZoomCanvas.getContext('2d');
+            const displayW = imageZoomCanvas.width;
+            const displayH = imageZoomCanvas.height;
+            ctx.clearRect(0, 0, displayW, displayH);
+
+            const sx = displayW / Math.max(1, state.image.naturalWidth);
+            const sy = displayH / Math.max(1, state.image.naturalHeight);
+            state.instances.forEach((instance, index) => {
+                if (!instance.box) return;
+                const isNegative = instance.sampleTypeSelect.value === 'negative';
+                const targetColor = isNegative ? NEGATIVE_SAMPLE_COLOR : POSITIVE_SAMPLE_COLOR;
+                const targetFill = isNegative ? NEGATIVE_SAMPLE_FILL : POSITIVE_SAMPLE_FILL;
+                const drawBox = {
+                    x: instance.box.x * sx,
+                    y: instance.box.y * sy,
+                    w: instance.box.w * sx,
+                    h: instance.box.h * sy,
+                };
+                if (drawBox.w < 1 || drawBox.h < 1) return;
+                ctx.strokeStyle = targetColor;
+                ctx.lineWidth = 2;
+                ctx.fillStyle = targetFill;
+                ctx.strokeRect(drawBox.x, drawBox.y, drawBox.w, drawBox.h);
+                ctx.fillRect(drawBox.x, drawBox.y, drawBox.w, drawBox.h);
+                const label = instance.categoryInput.value || `实例 ${index + 1}`;
+                const text = `${isNegative ? '负' : '正'} ${label}`;
+                ctx.font = '13px sans-serif';
+                const textWidth = Math.min(ctx.measureText(text).width + 16, Math.max(48, drawBox.w));
+                ctx.fillStyle = targetColor;
+                ctx.fillRect(drawBox.x, Math.max(0, drawBox.y - 24), textWidth, 22);
+                ctx.fillStyle = '#fff';
+                ctx.fillText(text, drawBox.x + 8, Math.max(15, drawBox.y - 8));
+            });
+
+            const pending = tempEnd || pendingAnnotation;
+            if (!pending) return;
+            const x1 = Math.min(annotationDrawState.startX, pending.x);
+            const y1 = Math.min(annotationDrawState.startY, pending.y);
+            const x2 = Math.max(annotationDrawState.startX, pending.x);
+            const y2 = Math.max(annotationDrawState.startY, pending.y);
+            const drawBox = { x: x1, y: y1, w: x2 - x1, h: y2 - y1 };
+            if (drawBox.w < 1 || drawBox.h < 1) return;
+            const previewSampleType = pendingAnnotation ? pendingAnnotation.sampleType : lastAnnotationSampleType;
+            const isNegative = previewSampleType === 'negative';
+            ctx.strokeStyle = isNegative ? NEGATIVE_SAMPLE_COLOR : POSITIVE_SAMPLE_COLOR;
+            ctx.lineWidth = 2;
+            ctx.fillStyle = isNegative ? NEGATIVE_SAMPLE_FILL : POSITIVE_SAMPLE_FILL;
+            ctx.strokeRect(drawBox.x, drawBox.y, drawBox.w, drawBox.h);
+            ctx.fillRect(drawBox.x, drawBox.y, drawBox.w, drawBox.h);
+        }
+
+        function resizeAnnotationZoomCanvas() {
+            if (imageZoomMode !== 'annotate' || !activeAnnotationState) return;
+            const displayW = imageZoomContent.clientWidth;
+            const displayH = imageZoomContent.clientHeight;
+            if (!displayW || !displayH) return;
+            imageZoomCanvas.width = displayW;
+            imageZoomCanvas.height = displayH;
+            drawAnnotationZoomOverlay();
+        }
+
+        function openAnnotationZoom(state) {
+            if (!state || !state.image.src) {
+                alert('请先上传样例图片');
+                return;
+            }
+            imageZoomMode = 'annotate';
+            activeAnnotationState = state;
+            pendingAnnotation = null;
+            annotationDrawState.drawing = false;
+            annotationLabelPicker.classList.remove('show');
+            imageZoomOverlay.classList.add('annotation-mode');
+            imageZoomTitle.textContent = state.file && state.file.name ? state.file.name : '样例图放大标注';
+            imageZoomMeta.textContent = `已标注 ${state.instances.filter((instance) => instance.box).length} 个实例`;
+            imageZoomContent.onload = function() {
+                resizeAnnotationZoomCanvas();
+            };
+            imageZoomContent.src = state.image.src;
+            imageZoomContent.alt = state.image.alt || '样例图放大标注';
+            imageZoomOverlay.classList.add('show');
+            imageZoomOverlay.setAttribute('aria-hidden', 'false');
+            annotationSampleTypeSelect.value = lastAnnotationSampleType;
+            refreshAnnotationLabelSelect();
+            window.setTimeout(resizeAnnotationZoomCanvas, 30);
+        }
+
+        imageZoomCanvas.addEventListener('mousedown', function(evt) {
+            if (imageZoomMode !== 'annotate' || !activeAnnotationState) return;
+            if (evt.button !== 0) return;
+            evt.preventDefault();
+            annotationLabelPicker.classList.remove('show');
+            const p = getAnnotationPointerPosition(evt);
+            annotationDrawState.drawing = true;
+            annotationDrawState.startX = p.x;
+            annotationDrawState.startY = p.y;
+            pendingAnnotation = null;
+        });
+
+        imageZoomCanvas.addEventListener('mousemove', function(evt) {
+            if (!annotationDrawState.drawing) return;
+            const p = getAnnotationPointerPosition(evt);
+            drawAnnotationZoomOverlay(p);
+        });
+
+        imageZoomCanvas.addEventListener('mouseup', function(evt) {
+            if (!annotationDrawState.drawing || !activeAnnotationState) return;
+            evt.preventDefault();
+            annotationDrawState.drawing = false;
+            const p = getAnnotationPointerPosition(evt);
+            const x1 = Math.min(annotationDrawState.startX, p.x);
+            const y1 = Math.min(annotationDrawState.startY, p.y);
+            const x2 = Math.max(annotationDrawState.startX, p.x);
+            const y2 = Math.max(annotationDrawState.startY, p.y);
+            const w = x2 - x1;
+            const h = y2 - y1;
+            if (w < 3 || h < 3) {
+                drawAnnotationZoomOverlay();
+                return;
+            }
+            const sx = Math.max(1, activeAnnotationState.image.naturalWidth) / Math.max(1, imageZoomCanvas.width);
+            const sy = Math.max(1, activeAnnotationState.image.naturalHeight) / Math.max(1, imageZoomCanvas.height);
+            pendingAnnotation = {
+                sampleType: lastAnnotationSampleType,
+                box: { x: x1 * sx, y: y1 * sy, w: w * sx, h: h * sy },
+                x: p.x,
+                y: p.y,
+            };
+            annotationSampleTypeSelect.value = lastAnnotationSampleType;
+            refreshAnnotationLabelSelect();
+            annotationLabelPicker.classList.add('show');
+            drawAnnotationZoomOverlay({ x: p.x, y: p.y });
+        });
+
+        imageZoomCanvas.addEventListener('mouseleave', function() {
+            if (!annotationDrawState.drawing) return;
+            annotationDrawState.drawing = false;
+            drawAnnotationZoomOverlay();
+        });
+
+        annotationSampleTypeSelect.addEventListener('change', function() {
+            if (!pendingAnnotation) return;
+            pendingAnnotation.sampleType = annotationSampleTypeSelect.value === 'negative' ? 'negative' : 'positive';
+            drawAnnotationZoomOverlay();
+        });
+
+        annotationLabelConfirm.addEventListener('click', function() {
+            if (!pendingAnnotation || !activeAnnotationState) return;
+            const category = annotationLabelSelect.value;
+            if (!category) {
+                alert('请选择标签');
+                return;
+            }
+            const sampleType = annotationSampleTypeSelect.value === 'negative' ? 'negative' : 'positive';
+            lastAnnotationSampleType = sampleType;
+            lastAnnotationLabel = category;
+            pendingAnnotation.sampleType = sampleType;
+            addSampleInstance(activeAnnotationState, {
+                sampleType,
+                category,
+                box: pendingAnnotation.box,
+            });
+            annotationLabelPicker.classList.remove('show');
+            pendingAnnotation = null;
+            imageZoomMeta.textContent = `已标注 ${activeAnnotationState.instances.filter((instance) => instance.box).length} 个实例`;
+            drawAnnotationZoomOverlay();
+            resizeSampleCanvas(activeAnnotationState);
+        });
+
+        annotationLabelCancel.addEventListener('click', function() {
+            pendingAnnotation = null;
+            annotationLabelPicker.classList.remove('show');
+            drawAnnotationZoomOverlay();
+        });
+
+        function loadSampleFileIntoState(state, file) {
+            state.file = file || null;
+            if (!file) {
+                state.drawWrap.style.display = 'none';
+                state.instances.forEach((instance) => {
+                    instance.box = null;
+                    instance.pasteBox = null;
+                    syncSampleBoxInput(instance);
+                    syncSamplePasteBoxInput(instance);
+                });
+                drawSampleBoxOverlay(state);
+                return;
+            }
+            const reader = new FileReader();
+            reader.onload = function(ev) {
+                state.image.onload = function() {
+                    state.drawWrap.style.display = 'inline-block';
+                    resizeSampleCanvas(state);
+                };
+                state.image.src = ev.target.result;
+                state.image.alt = file.name || '样例预览';
+                state.instances.forEach((instance) => {
+                    instance.box = null;
+                    instance.pasteBox = null;
+                    syncSampleBoxInput(instance);
+                    syncSamplePasteBoxInput(instance);
+                });
+                drawSampleBoxOverlay(state);
+            };
+            reader.readAsDataURL(file);
+        }
+
+        function clearAllSampleCards() {
+            sampleStates.clear();
+            sampleList.innerHTML = '';
+            sampleCounter = 0;
+        }
+
+        function addSampleCard(initialFile = null) {
+            sampleCounter += 1;
+            const sampleId = `sample_${sampleCounter}`;
+            const card = document.createElement('div');
+            card.className = 'sample-card';
+            card.dataset.sampleId = sampleId;
+            card.innerHTML = `
+                <div class="sample-card-header">
+                    <div class="sample-card-title">样例</div>
+                    <button type="button" class="small-btn" data-action="remove-sample">删除</button>
+                </div>
+                <div class="two-col">
+                    <div class="form-group">
+                        <label>样例图片</label>
+                        <input type="file" data-role="sample-file" accept="image/*">
+                        <div class="draw-wrap" style="display:none;">
+                            <img data-role="sample-image" alt="样例预览">
+                            <canvas data-role="sample-canvas" class="draw-canvas"></canvas>
+                        </div>
+                        <div class="draw-actions">
+                            <button type="button" class="small-btn" data-action="clear-sample-box">清除框</button>
+                            <button type="button" class="small-btn" data-action="open-annotation">放大标注</button>
+                            <span class="draw-tip">点击样例图放大；放大后用左键拖框，再选择正/负样本和标签</span>
+                        </div>
+                    </div>
+                    <div>
+                        <div class="sample-card-header">
+                            <div class="sample-card-title">实例列表</div>
+                            <button type="button" class="small-btn" data-action="add-instance">添加实例</button>
+                        </div>
+                        <div class="instance-list" data-role="instance-list"></div>
+                    </div>
+                </div>
+            `;
+            sampleList.appendChild(card);
+            refreshSampleTitles();
+
+            const state = {
+                id: sampleId,
+                card,
+                fileInput: card.querySelector('[data-role="sample-file"]'),
+                image: card.querySelector('[data-role="sample-image"]'),
+                canvas: card.querySelector('[data-role="sample-canvas"]'),
+                drawWrap: card.querySelector('.draw-wrap'),
+                instanceList: card.querySelector('[data-role="instance-list"]'),
+                instances: [],
+                instanceCounter: 0,
+                file: initialFile || null,
+                activeInstanceId: null,
+                activeDrawKind: 'target',
+                drawing: false,
+                startX: 0,
+                startY: 0,
+            };
+            sampleStates.set(sampleId, state);
+            refreshSampleInstanceTitles(state);
+
+            state.fileInput.addEventListener('change', function(e) {
+                const file = e.target.files && e.target.files[0];
+                loadSampleFileIntoState(state, file || null);
+            });
+
+            if (initialFile) {
+                loadSampleFileIntoState(state, initialFile);
+            }
+
+            state.canvas.addEventListener('mousedown', function(evt) {
+                if (!state.image.src) return;
+                if (evt.button !== 0) return;
+                const p = getSamplePointerPosition(state.canvas, evt);
+                state.drawing = true;
+                state.startX = p.x;
+                state.startY = p.y;
+            });
+            state.canvas.addEventListener('mousemove', function(evt) {
+                if (!state.drawing) return;
+                const p = getSamplePointerPosition(state.canvas, evt);
+                drawSampleBoxOverlay(state, p);
+            });
+            state.canvas.addEventListener('mouseup', function(evt) {
+                if (!state.drawing) return;
+                state.drawing = false;
+                const p = getSamplePointerPosition(state.canvas, evt);
+                const x1 = Math.min(state.startX, p.x);
+                const y1 = Math.min(state.startY, p.y);
+                const x2 = Math.max(state.startX, p.x);
+                const y2 = Math.max(state.startY, p.y);
+                const w = x2 - x1;
+                const h = y2 - y1;
+                if (w < 3 || h < 3) {
+                    openAnnotationZoom(state);
+                    drawSampleBoxOverlay(state);
+                    return;
+                }
+                const activeInstance = getActiveSampleInstance(state);
+                if (!activeInstance) {
+                    openAnnotationZoom(state);
+                    drawSampleBoxOverlay(state);
+                    return;
+                }
+                const sx = Math.max(1, state.image.naturalWidth) / Math.max(1, state.canvas.width);
+                const sy = Math.max(1, state.image.naturalHeight) / Math.max(1, state.canvas.height);
+                if (state.activeDrawKind === 'paste') {
+                    activeInstance.pasteBox = { x: x1 * sx, y: y1 * sy, w: w * sx, h: h * sy };
+                    syncSamplePasteBoxInput(activeInstance);
+                } else {
+                    activeInstance.box = { x: x1 * sx, y: y1 * sy, w: w * sx, h: h * sy };
+                    syncSampleBoxInput(activeInstance);
+                }
+                drawSampleBoxOverlay(state);
+            });
+            state.canvas.addEventListener('mouseleave', function() {
+                if (!state.drawing) return;
+                state.drawing = false;
+                drawSampleBoxOverlay(state);
+            });
+        }
+
+        sampleList.addEventListener('click', function(e) {
+            const btn = e.target.closest('button[data-action]');
+            if (!btn) return;
+            const card = e.target.closest('.sample-card');
+            if (!card) return;
+            const state = sampleStates.get(card.dataset.sampleId);
+            if (!state) return;
+            const action = btn.getAttribute('data-action');
+            if (action === 'clear-sample-box') {
+                clearSampleBox(state);
+            } else if (action === 'open-annotation') {
+                openAnnotationZoom(state);
+            } else if (action === 'add-instance') {
+                addSampleInstance(state);
+            } else if (action === 'select-target-box') {
+                const row = e.target.closest('.instance-row');
+                if (row) setActiveSampleInstance(state, row.dataset.instanceId, 'target');
+            } else if (action === 'select-paste-box') {
+                const row = e.target.closest('.instance-row');
+                if (row) setActiveSampleInstance(state, row.dataset.instanceId, 'paste');
+            } else if (action === 'remove-instance') {
+                const row = e.target.closest('.instance-row');
+                if (!row) return;
+                const instanceIndex = state.instances.findIndex((instance) => instance.id === row.dataset.instanceId);
+                if (instanceIndex < 0) return;
+                state.instances.splice(instanceIndex, 1);
+                row.remove();
+                if (!state.instances.length) {
+                    state.activeInstanceId = null;
+                    refreshSampleInstanceTitles(state);
+                    drawSampleBoxOverlay(state);
+                } else {
+                    refreshSampleInstanceTitles(state);
+                    setActiveSampleInstance(state, state.instances[Math.max(0, instanceIndex - 1)].id, 'target');
+                }
+            } else if (action === 'remove-sample') {
+                sampleStates.delete(state.id);
+                card.remove();
+                refreshSampleTitles();
+                if (sampleStates.size === 0) addSampleCard();
+            }
+        });
+
+        addSampleBtn.addEventListener('click', function() {
+            addSampleCard();
+        });
+
+        multiSampleImageFiles.addEventListener('change', function(e) {
+            const files = Array.from(e.target.files || []);
+            if (!files.length) return;
+            clearAllSampleCards();
+            files.forEach((file) => addSampleCard(file));
+            refreshSampleTitles();
+        });
+
+        function updateMultiSampleUi() {
+            const isMulti = multiSampleToggle.checked;
+            const referenceGroup = referenceImageFile.closest('.form-group');
+            singleSampleFields.style.display = isMulti ? 'none' : '';
+            multiSampleFields.style.display = isMulti ? '' : 'none';
+            addSampleBtn.style.display = isMulti ? '' : 'none';
+            if (referenceGroup) referenceGroup.style.display = isMulti ? 'none' : '';
+            referenceImageFile.required = !isMulti;
+            document.getElementById('referenceBndPoints').required = !isMulti;
+            similarModeSelect.disabled = isMulti;
+            if (isMulti && sampleStates.size === 0) {
+                addSampleCard();
+            }
+            updateSimilarModeUi();
+        }
+
+        multiSampleToggle.addEventListener('change', updateMultiSampleUi);
+        updateMultiSampleUi();
+
         window.addEventListener('resize', function() {
             resizeReferenceCanvas();
+            sampleStates.forEach((state) => resizeSampleCanvas(state));
+            resizeAnnotationZoomCanvas();
         });
 
         // Update confidence value display
@@ -1198,15 +2354,20 @@
                 `<div style="font-size:0.9em; margin-bottom:6px;">
                     #${index + 1}
                     类别=${escapeHtml(item.category || 'similar_object')},
+                    样例图=${escapeHtml(item.source_image_id || '-')},
+                    实例=${escapeHtml(item.sample_id || '-')},
                     相似度=<strong>${Number(item.similarity_score ?? 0).toFixed(3)}</strong>,
                     SAM分数=${Number(item.score ?? 0).toFixed(3)},
                     组合分=${Number(item.combined_score ?? 0).toFixed(3)},
-                    框=[${(item.bnd_points || []).join(', ')}]
+                    框=[${(item.bnd_points || []).join(', ')}],
+                    粘贴区域=${Array.isArray(item.paste_bnd_points) ? `[${item.paste_bnd_points.join(', ')}]` : '默认'}
                 </div>`
             )).join('');
         }
 
         function renderSimilarResult(data) {
+            referenceResultTitle.textContent = '示例目标分割结果（SAM+box）';
+            resultImageTitle.textContent = '图2相似目标比对结果';
             const queryResults = Array.isArray(data.query_results) && data.query_results.length
                 ? data.query_results
                 : [data];
@@ -1232,8 +2393,16 @@
                     <div class="info-value">${totalMatches} 个</div>
                 </div>
                 <div class="info-card">
+                    <div class="info-label">样例数量</div>
+                    <div class="info-value">${Number(data.num_samples ?? queryResults[0]?.num_samples ?? 1)} 个</div>
+                </div>
+                <div class="info-card">
                     <div class="info-label">SAM 阈值</div>
                     <div class="info-value">${Number(data.sam_threshold ?? queryResults[0]?.sam_threshold ?? 0).toFixed(2)}</div>
+                </div>
+                <div class="info-card">
+                    <div class="info-label">NMS IoU</div>
+                    <div class="info-value">${Number(data.nms_iou ?? queryResults[0]?.nms_iou ?? 0.45).toFixed(2)}</div>
                 </div>
                 <div class="info-card">
                     <div class="info-label">相似度阈值</div>
@@ -1309,19 +2478,114 @@
             }).join('');
         }
 
+        function parseBoxText(raw) {
+            const values = String(raw || '').split(',').map((item) => Number(item.trim()));
+            if (values.length !== 4 || values.some((item) => !Number.isFinite(item))) {
+                return null;
+            }
+            return values;
+        }
+
+        function buildMultiSampleFormData() {
+            const queryFiles = Array.from(queryImageFile.files || []);
+            if (!queryFiles.length) {
+                throw new Error('请至少选择一张待识别图');
+            }
+
+            const states = Array.from(sampleStates.values());
+            if (!states.length) {
+                throw new Error('请至少添加一个样例');
+            }
+
+            const sampleMeta = [];
+            let positiveSampleCount = 0;
+            const formData = new FormData();
+            states.forEach((state, index) => {
+                const file = state.file || (state.fileInput.files && state.fileInput.files[0]);
+                if (!file) {
+                    throw new Error(`样例 #${index + 1} 需要上传图片`);
+                }
+                formData.append('sample_file', file);
+                state.instances.forEach((instance, instanceIndex) => {
+                    const sampleType = instance.sampleTypeSelect.value === 'negative' ? 'negative' : 'positive';
+                    const category = instance.categoryInput.value.trim();
+                    const bndPoints = parseBoxText(instance.boxInput.value);
+                    const rawPasteBox = instance.pasteBoxInput.value.trim();
+                    const pasteBndPoints = rawPasteBox ? parseBoxText(rawPasteBox) : null;
+                    const promptText = instance.promptInput.value.trim();
+                    const hasAnyInput = Boolean(category || bndPoints || rawPasteBox || promptText);
+                    if (!hasAnyInput) {
+                        return;
+                    }
+                    if (!category) {
+                        throw new Error(`样例 #${index + 1} 的实例 #${instanceIndex + 1} 需要填写目标类`);
+                    }
+                    if (!bndPoints) {
+                        throw new Error(`样例 #${index + 1} 的实例 #${instanceIndex + 1} 需要填写或框选 x,y,w,h`);
+                    }
+                    if (rawPasteBox && !pasteBndPoints) {
+                        throw new Error(`样例 #${index + 1} 的实例 #${instanceIndex + 1} 粘贴区域框格式需要为 x,y,w,h`);
+                    }
+                    if (sampleType === 'positive') {
+                        positiveSampleCount += 1;
+                    }
+                    sampleMeta.push({
+                        sample_id: `${state.id}_inst_${instanceIndex + 1}`,
+                        source_image_id: state.id,
+                        file_index: index,
+                        sample_type: sampleType,
+                        is_negative: sampleType === 'negative',
+                        category,
+                        reference_bnd_points: bndPoints,
+                        paste_bnd_points: pasteBndPoints,
+                        prompt: promptText || null,
+                    });
+                });
+            });
+            if (!sampleMeta.length) {
+                throw new Error('请至少添加一个样例实例');
+            }
+            if (positiveSampleCount < 1) {
+                throw new Error('请至少添加一个正样本');
+            }
+
+            queryFiles.forEach((file) => formData.append('query_file', file));
+            formData.append('sample_meta', JSON.stringify(sampleMeta));
+            formData.append('top_k', document.getElementById('similarTopK').value || '5');
+            formData.append('similarity_threshold', similarityThreshold.value || '0.6');
+            formData.append('sam_threshold', similarSamThreshold.value || '0.2');
+            formData.append('nms_iou', '0.45');
+            formData.append('polygon_simplify_epsilon', '2.0');
+            return formData;
+        }
+
         similarForm.addEventListener('submit', async function(e) {
             e.preventDefault();
 
+            const isMultiSampleMode = multiSampleToggle.checked;
             const refBoxInput = document.getElementById('referenceBndPoints');
-            if (!refBoxInput.value || !refBoxInput.value.trim()) {
+            if (!isMultiSampleMode && (!refBoxInput.value || !refBoxInput.value.trim())) {
                 error.textContent = '请先填写样图目标框，格式 x,y,w,h';
                 error.classList.add('show');
                 return;
             }
 
-            const formData = new FormData(similarForm);
-            if (similarModeSelect.value === 'same_image_prompt') {
-                formData.delete('query_file');
+            let formData = null;
+            let endpoint = '/similar-detect';
+            try {
+                if (isMultiSampleMode) {
+                    endpoint = '/multi-similar-detect';
+                    formData = buildMultiSampleFormData();
+                } else {
+                    formData = new FormData(similarForm);
+                    if (similarModeSelect.value === 'same_image_prompt') {
+                        formData.delete('query_file');
+                    }
+                }
+            } catch (err) {
+                error.textContent = err.message;
+                error.classList.add('show');
+                return;
             }
             loading.classList.add('show');
             error.classList.remove('show');
@@ -1329,7 +2593,7 @@
             similarSubmitBtn.disabled = true;
 
             try {
-                const response = await fetch('/similar-detect', {
+                const response = await fetch(endpoint, {
                     method: 'POST',
                     body: formData,
                 });
@@ -1427,6 +2691,8 @@
                     `;
 
                     resultInfo.innerHTML = infoCards;
+                    referenceResultTitle.textContent = '样图结果';
+                    resultImageTitle.textContent = 'Prompt 文本识别结果';
                     if (data.result_image) {
                         resultImage.style.display = 'block';
                         resultImage.src = `/results/${data.result_image}?t=${Date.now()}`;

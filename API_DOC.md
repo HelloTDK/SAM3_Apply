@@ -33,6 +33,7 @@ X-API-Key: <api_key>
 
 ## 1. Prompt 文本识别
 
+
 ### 1.1 JSON 接口
 
 `POST /v1/segmentations`
@@ -205,7 +206,7 @@ Authorization: Bearer <api_key>
 | --- | --- |
 | `concat_prompt` | 拼接图识别。先分割示例目标并抠图，再拼到目标图旁边，用 SAM3 visual prompt 找相似目标；可选 `prompt` 作为 box+text 约束 |
 | `same_image_prompt` | 同图拉框识别。示例框和待找目标在同一张图，直接使用 SAM3 原生 visual prompt |
-| `feature_match` | 特征粗筛 + SAM3 精分割。速度通常较慢，作为备选 |
+| `feature_match` | 跨图原生 visual prompt。先把参考框编码成 reference prompt，再直接在目标图上跑 SAM3 grounding，不再使用 cosine 特征粗筛 |
 
 ### 3.1 拼接图识别
 
@@ -375,7 +376,7 @@ http://192.168.100.25:8006/results/result_20260521_101000_000003.jpg
 }
 ```
 
-该模式会返回 `profile`，包含候选生成和逐框 SAM3 推理耗时，便于排查慢请求。
+该模式会返回 `profile`，包含 reference prompt 编码、query grounding 和 NMS 后候选数量，便于排查慢请求。
 
 ## 4. Multipart 相似识别接口
 
@@ -455,4 +456,4 @@ curl -X POST 'http://192.168.100.25:8006/similar-detect' \
 - 用户已经画了一个框，只需要分割这个框内目标：用 `/v1/box-segmentations`。
 - 示例目标和搜索目标在同一张图：用 `similar_mode=same_image_prompt`。
 - 示例图 A + 目标图 B 找相似目标：优先用 `similar_mode=concat_prompt`。
-- 需要排查候选速度/质量时，再尝试 `similar_mode=feature_match`。
+- 需要跨图但又不想走拼接图方案时，可尝试 `similar_mode=feature_match`。

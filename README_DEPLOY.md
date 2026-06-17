@@ -203,4 +203,4 @@ cd /expdata/givap/research/sam3/deploy3.3
 相似识别支持两种模式：
 
 - `similar_mode=concat_prompt`（默认）：先用 SAM3 分割样图目标并抠出目标 patch，把 patch 拼到待识别图旁边，再用 SAM3 visual prompt 在拼接图中找相似目标。可选 `prompt` 文本描述；拼接模式填写后会把该描述和示例框一起传给 Ultralytics SAM3。返回 `concat_prompt_images`，前端会显示拼接调试图，方便确认拼接是否正确。
-- `similar_mode=feature_match`：从参考框提取 SAM3 视觉特征，粗筛 B 中候选位置，再用 Ultralytics SAM3 box prompt 精分割候选。
+- `similar_mode=feature_match`：跨图原生 visual prompt。先把样图框编码成 reference prompt embedding，再直接在待识别图上跑 SAM3 grounding，分数使用模型原生 dot-product scoring，不再走 cosine 粗筛。
