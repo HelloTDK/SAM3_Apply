@@ -791,100 +791,50 @@
         <div class="upload-section">
             <h2 class="section-title">🧭 相似目标识别测试</h2>
             <form id="similarForm">
-                <div class="two-col">
-                    <div class="form-group">
-                        <label for="referenceImageFile">🖼️ 示例图 / 同图识别图</label>
-                        <input type="file" id="referenceImageFile" name="reference_file" accept="image/*" required>
-                        <div class="draw-wrap" id="referenceDrawWrap" style="display:none;">
-                            <img id="referenceDrawImage" alt="样图预览">
-                            <canvas id="referenceDrawCanvas" class="draw-canvas"></canvas>
-                        </div>
-                        <div class="draw-actions">
-                            <button type="button" class="small-btn" id="clearReferenceBoxBtn">清除样图框</button>
-                            <span class="draw-tip">在图上拖拽鼠标画示例目标框，坐标会自动填入下方输入框</span>
-                        </div>
-                    </div>
-                    <div class="form-group">
-                        <label for="queryImageFile">🎯 待识别图</label>
-                        <input type="file" id="queryImageFile" name="query_file" accept="image/*" multiple required>
-                        <div id="queryPreview" class="preview-section"></div>
-                    </div>
+                <div class="form-group">
+                    <label for="queryImageFile">🎯 待识别图</label>
+                    <input type="file" id="queryImageFile" name="query_file" accept="image/*" multiple required>
+                    <div id="queryPreview" class="preview-section"></div>
                 </div>
 
                 <div class="form-group">
-                    <div class="mode-toggle-row">
-                        <label style="margin:0;">
-                            <input type="checkbox" id="multiSampleToggle">
-                            多样例多类别原生识别模式
-                        </label>
-                        <button type="button" class="small-btn" id="addSampleBtn" style="display:none;">添加样例</button>
-                    </div>
-                    <p class="hint">开启后，可一次上传多张样例图，先构建标签，再点击样例图放大后连续标注正/负样本框，并提交到多样例原生 visual prompt 接口；关闭时使用原单样例流程。</p>
-                </div>
-
-                <div id="singleSampleFields">
-                    <div class="form-group">
-                        <label for="referenceBndPoints">📦 示例目标框（必填）</label>
-                        <input type="text" id="referenceBndPoints" name="reference_bnd_points" required placeholder="必须填写 x,y,w,h，例如 120,80,260,300">
-                        <p class="hint">请输入示例目标的像素框坐标：x,y,w,h。</p>
-                    </div>
-
-                    <div class="form-group" id="similarPromptGroup">
-                        <label for="similarPromptText">🔤 相似目标文本描述</label>
-                        <input type="text" id="similarPromptText" name="prompt" placeholder="例如：红色安全帽、白色车辆、穿反光背心的人">
-                        <p class="hint">可选；拼接模式填写后会和示例框一起传给 SAM3。</p>
-                    </div>
-                </div>
-
-                <div class="form-group" id="multiSampleFields" style="display:none;">
-                    <label>🧩 多类别样例</label>
+                    <label>🧩 样例与标签</label>
                     <div class="label-builder">
                         <input type="text" id="labelNameInput" placeholder="输入标签名称，例如：安全帽、车辆、人员">
                         <button type="button" class="small-btn" id="addLabelBtn">构建标签</button>
                     </div>
+                    <p class="hint">默认按单样例识别；继续添加标签、样例或实例即可扩展为多类别、多样例识别。</p>
                     <div id="labelList" class="label-list"></div>
-                    <div class="form-group">
-                        <label for="multiSampleImageFiles">样例图片（可多选）</label>
-                        <input type="file" id="multiSampleImageFiles" accept="image/*" multiple>
-                        <p class="hint">选择多张图片后会自动生成多个样例卡片；也可以继续点击“添加样例”手动补充。</p>
+                    <div class="two-col">
+                        <div class="form-group">
+                            <label for="multiSampleImageFiles">样例图片（可多选）</label>
+                            <input type="file" id="multiSampleImageFiles" accept="image/*" multiple>
+                            <p class="hint">选择多张图片后会自动生成多个样例卡片。</p>
+                        </div>
+                        <div class="form-group">
+                            <label>手动添加样例</label>
+                            <button type="button" class="small-btn" id="addSampleBtn">添加样例</button>
+                            <p class="hint">单样例保留一个样例卡片即可。</p>
+                        </div>
                     </div>
                     <div id="sampleList" class="sample-list"></div>
                 </div>
 
-                <div class="two-col">
-                    <div class="form-group">
-                        <label for="similarTopK">🔢 候选框数量 Top-K</label>
-                        <input type="number" id="similarTopK" name="top_k" min="1" max="20" step="1" value="5">
-                    </div>
-                    <div class="form-group">
-                        <label for="similarMode">🧪 相似识别模式</label>
-                        <select id="similarMode" name="similar_mode">
-                            <option value="same_image_prompt">同图拉框 + SAM3 原生 visual prompt</option>
-                            <option value="concat_prompt">拼接图 + SAM3 visual prompt</option>
-                            <option value="feature_match">跨图原生 visual prompt</option>
-                        </select>
-                    </div>
+                <div class="form-group">
+                    <label for="similarTopK">🔢 候选框数量 Top-K</label>
+                    <input type="number" id="similarTopK" name="top_k" min="1" max="20" step="1" value="5">
                 </div>
 
-                <div class="two-col">
-                    <div class="form-group">
-                        <label for="similarSamThreshold">
-                            🎯 SAM 阈值
-                            <span class="confidence-value" id="similarSamThresholdValue">0.20</span>
-                        </label>
-                        <div class="slider-container">
-                            <input type="range" id="similarSamThreshold" name="sam_threshold" min="0.0" max="1.0" step="0.01" value="0.20">
-                        </div>
+                <div class="form-group">
+                    <label for="similarSamThreshold">
+                        🎯 SAM 置信度阈值
+                        <span class="confidence-value" id="similarSamThresholdValue">0.60</span>
+                    </label>
+                    <div class="slider-container">
+                        <input type="range" id="similarSamThreshold" name="sam_threshold" min="0.0" max="1.0" step="0.01" value="0.60">
+                        <input type="hidden" id="similarityThresholdCompat" name="similarity_threshold" value="0.60">
                     </div>
-                    <div class="form-group">
-                        <label for="similarityThreshold">
-                            📐 相似度阈值
-                            <span class="confidence-value" id="similarityThresholdValue">0.60</span>
-                        </label>
-                        <div class="slider-container">
-                            <input type="range" id="similarityThreshold" name="similarity_threshold" min="-1.0" max="1.0" step="0.01" value="0.60">
-                        </div>
-                    </div>
+                    <p class="hint">用于过滤 SAM3 visual prompt 候选结果；数值越高，保留结果越严格。</p>
                 </div>
 
                 <button type="submit" class="submit-btn" id="similarSubmitBtn">🔍 开始相似目标识别</button>
@@ -937,10 +887,6 @@
                     <img id="resultImage" class="preview-image" alt="比对结果" style="display:none;">
                 </div>
             </div>
-            <div id="concatDebugSection" style="display:none; margin-top:16px;">
-                <div class="hint">拼接调试图（用于确认参考目标是否正确拼接）</div>
-                <div id="concatDebugImages" class="preview-section"></div>
-            </div>
             <div id="queryResultsList" class="preview-section"></div>
         </div>
     </div>
@@ -978,16 +924,7 @@
         const fileInput = document.getElementById('imageFile');
         const preview = document.getElementById('preview');
         const similarForm = document.getElementById('similarForm');
-        const referenceImageFile = document.getElementById('referenceImageFile');
         const queryImageFile = document.getElementById('queryImageFile');
-        const similarModeSelect = document.getElementById('similarMode');
-        const referenceDrawWrap = document.getElementById('referenceDrawWrap');
-        const referenceDrawImage = document.getElementById('referenceDrawImage');
-        const referenceDrawCanvas = document.getElementById('referenceDrawCanvas');
-        const clearReferenceBoxBtn = document.getElementById('clearReferenceBoxBtn');
-        const multiSampleToggle = document.getElementById('multiSampleToggle');
-        const singleSampleFields = document.getElementById('singleSampleFields');
-        const multiSampleFields = document.getElementById('multiSampleFields');
         const sampleList = document.getElementById('sampleList');
         const addSampleBtn = document.getElementById('addSampleBtn');
         const labelNameInput = document.getElementById('labelNameInput');
@@ -998,8 +935,7 @@
         const similarSubmitBtn = document.getElementById('similarSubmitBtn');
         const similarSamThreshold = document.getElementById('similarSamThreshold');
         const similarSamThresholdValue = document.getElementById('similarSamThresholdValue');
-        const similarityThreshold = document.getElementById('similarityThreshold');
-        const similarityThresholdValue = document.getElementById('similarityThresholdValue');
+        const similarityThresholdCompat = document.getElementById('similarityThresholdCompat');
         const loading = document.getElementById('loading');
         const error = document.getElementById('error');
         const resultSection = document.getElementById('resultSection');
@@ -1008,8 +944,6 @@
         const referenceResultImage = document.getElementById('referenceResultImage');
         const resultImageTitle = document.getElementById('resultImageTitle');
         const resultImage = document.getElementById('resultImage');
-        const concatDebugSection = document.getElementById('concatDebugSection');
-        const concatDebugImages = document.getElementById('concatDebugImages');
         const queryResultsList = document.getElementById('queryResultsList');
         const submitBtn = document.getElementById('submitBtn');
         const newKeyName = document.getElementById('newKeyName');
@@ -1377,171 +1311,6 @@
         bindImagePreview(fileInput, preview, '图片预览');
         bindMultiImagePreview(queryImageFile, queryPreview);
 
-        function updateSimilarModeUi() {
-            const isMultiSampleMode = multiSampleToggle.checked;
-            const isSameImageMode = !isMultiSampleMode && similarModeSelect.value === 'same_image_prompt';
-            const queryGroup = queryImageFile.closest('.form-group');
-            if (queryGroup) {
-                queryGroup.style.display = isSameImageMode ? 'none' : '';
-            }
-            queryImageFile.required = !isSameImageMode;
-            if (isSameImageMode) {
-                queryPreview.innerHTML = '';
-            }
-        }
-
-        similarModeSelect.addEventListener('change', updateSimilarModeUi);
-        updateSimilarModeUi();
-
-        const referenceDrawState = {
-            drawing: false,
-            startX: 0,
-            startY: 0,
-            currentX: 0,
-            currentY: 0,
-            box: null, // {x, y, w, h} in original image pixels
-        };
-
-        function getCanvasPointerPosition(evt) {
-            const rect = referenceDrawCanvas.getBoundingClientRect();
-            const x = evt.clientX - rect.left;
-            const y = evt.clientY - rect.top;
-            return { x, y };
-        }
-
-        function drawReferenceBoxOverlay(tempEnd = null) {
-            const ctx = referenceDrawCanvas.getContext('2d');
-            const displayW = referenceDrawCanvas.width;
-            const displayH = referenceDrawCanvas.height;
-            ctx.clearRect(0, 0, displayW, displayH);
-
-            let drawBox = null;
-            if (tempEnd) {
-                const x1 = Math.min(referenceDrawState.startX, tempEnd.x);
-                const y1 = Math.min(referenceDrawState.startY, tempEnd.y);
-                const x2 = Math.max(referenceDrawState.startX, tempEnd.x);
-                const y2 = Math.max(referenceDrawState.startY, tempEnd.y);
-                drawBox = { x: x1, y: y1, w: x2 - x1, h: y2 - y1 };
-            } else if (referenceDrawState.box) {
-                const sx = displayW / Math.max(1, referenceDrawImage.naturalWidth);
-                const sy = displayH / Math.max(1, referenceDrawImage.naturalHeight);
-                drawBox = {
-                    x: referenceDrawState.box.x * sx,
-                    y: referenceDrawState.box.y * sy,
-                    w: referenceDrawState.box.w * sx,
-                    h: referenceDrawState.box.h * sy,
-                };
-            }
-
-            if (!drawBox || drawBox.w < 1 || drawBox.h < 1) {
-                return;
-            }
-
-            ctx.strokeStyle = '#ff2d2d';
-            ctx.lineWidth = 2;
-            ctx.fillStyle = 'rgba(255, 45, 45, 0.12)';
-            ctx.strokeRect(drawBox.x, drawBox.y, drawBox.w, drawBox.h);
-            ctx.fillRect(drawBox.x, drawBox.y, drawBox.w, drawBox.h);
-        }
-
-        function syncReferenceBoxInput() {
-            const input = document.getElementById('referenceBndPoints');
-            if (!referenceDrawState.box) {
-                input.value = '';
-                return;
-            }
-            const { x, y, w, h } = referenceDrawState.box;
-            input.value = `${Math.round(x)},${Math.round(y)},${Math.round(w)},${Math.round(h)}`;
-        }
-
-        function resizeReferenceCanvas() {
-            if (!referenceDrawImage.src) return;
-            const displayW = referenceDrawImage.clientWidth;
-            const displayH = referenceDrawImage.clientHeight;
-            if (!displayW || !displayH) return;
-            referenceDrawCanvas.width = displayW;
-            referenceDrawCanvas.height = displayH;
-            drawReferenceBoxOverlay();
-        }
-
-        function clearReferenceBox() {
-            referenceDrawState.box = null;
-            syncReferenceBoxInput();
-            drawReferenceBoxOverlay();
-        }
-
-        clearReferenceBoxBtn.addEventListener('click', clearReferenceBox);
-
-        referenceImageFile.addEventListener('change', function(e) {
-            const file = e.target.files && e.target.files[0];
-            if (!file) {
-                referenceDrawWrap.style.display = 'none';
-                clearReferenceBox();
-                return;
-            }
-            const reader = new FileReader();
-            reader.onload = function(ev) {
-                referenceDrawImage.onload = function() {
-                    referenceDrawWrap.style.display = 'inline-block';
-                    resizeReferenceCanvas();
-                };
-                referenceDrawImage.src = ev.target.result;
-                clearReferenceBox();
-            };
-            reader.readAsDataURL(file);
-        });
-
-        referenceDrawCanvas.addEventListener('mousedown', function(evt) {
-            if (!referenceDrawImage.src) return;
-            const p = getCanvasPointerPosition(evt);
-            referenceDrawState.drawing = true;
-            referenceDrawState.startX = p.x;
-            referenceDrawState.startY = p.y;
-            referenceDrawState.currentX = p.x;
-            referenceDrawState.currentY = p.y;
-        });
-
-        referenceDrawCanvas.addEventListener('mousemove', function(evt) {
-            if (!referenceDrawState.drawing) return;
-            const p = getCanvasPointerPosition(evt);
-            referenceDrawState.currentX = p.x;
-            referenceDrawState.currentY = p.y;
-            drawReferenceBoxOverlay({ x: p.x, y: p.y });
-        });
-
-        referenceDrawCanvas.addEventListener('mouseup', function(evt) {
-            if (!referenceDrawState.drawing) return;
-            referenceDrawState.drawing = false;
-            const p = getCanvasPointerPosition(evt);
-            const x1 = Math.min(referenceDrawState.startX, p.x);
-            const y1 = Math.min(referenceDrawState.startY, p.y);
-            const x2 = Math.max(referenceDrawState.startX, p.x);
-            const y2 = Math.max(referenceDrawState.startY, p.y);
-            const w = x2 - x1;
-            const h = y2 - y1;
-            if (w < 3 || h < 3) {
-                drawReferenceBoxOverlay();
-                return;
-            }
-
-            const sx = Math.max(1, referenceDrawImage.naturalWidth) / Math.max(1, referenceDrawCanvas.width);
-            const sy = Math.max(1, referenceDrawImage.naturalHeight) / Math.max(1, referenceDrawCanvas.height);
-            referenceDrawState.box = {
-                x: x1 * sx,
-                y: y1 * sy,
-                w: w * sx,
-                h: h * sy,
-            };
-            syncReferenceBoxInput();
-            drawReferenceBoxOverlay();
-        });
-
-        referenceDrawCanvas.addEventListener('mouseleave', function() {
-            if (!referenceDrawState.drawing) return;
-            referenceDrawState.drawing = false;
-            drawReferenceBoxOverlay();
-        });
-
         let sampleCounter = 0;
         const sampleStates = new Map();
         const POSITIVE_SAMPLE_COLOR = '#0f766e';
@@ -1662,7 +1431,7 @@
             updateAllInstanceCategorySelects();
         });
 
-        renderLabelList();
+        addLabel('目标');
 
         function getSamplePointerPosition(canvas, evt) {
             const rect = canvas.getBoundingClientRect();
@@ -2303,27 +2072,9 @@
             refreshSampleTitles();
         });
 
-        function updateMultiSampleUi() {
-            const isMulti = multiSampleToggle.checked;
-            const referenceGroup = referenceImageFile.closest('.form-group');
-            singleSampleFields.style.display = isMulti ? 'none' : '';
-            multiSampleFields.style.display = isMulti ? '' : 'none';
-            addSampleBtn.style.display = isMulti ? '' : 'none';
-            if (referenceGroup) referenceGroup.style.display = isMulti ? 'none' : '';
-            referenceImageFile.required = !isMulti;
-            document.getElementById('referenceBndPoints').required = !isMulti;
-            similarModeSelect.disabled = isMulti;
-            if (isMulti && sampleStates.size === 0) {
-                addSampleCard();
-            }
-            updateSimilarModeUi();
-        }
-
-        multiSampleToggle.addEventListener('change', updateMultiSampleUi);
-        updateMultiSampleUi();
+        addSampleCard();
 
         window.addEventListener('resize', function() {
-            resizeReferenceCanvas();
             sampleStates.forEach((state) => resizeSampleCanvas(state));
             resizeAnnotationZoomCanvas();
         });
@@ -2337,11 +2088,9 @@
         });
 
         similarSamThreshold.addEventListener('input', function(e) {
-            similarSamThresholdValue.textContent = parseFloat(e.target.value).toFixed(2);
-        });
-
-        similarityThreshold.addEventListener('input', function(e) {
-            similarityThresholdValue.textContent = parseFloat(e.target.value).toFixed(2);
+            const value = parseFloat(e.target.value).toFixed(2);
+            similarSamThresholdValue.textContent = value;
+            similarityThresholdCompat.value = value;
         });
 
         // Set example prompt
@@ -2356,9 +2105,7 @@
                     类别=${escapeHtml(item.category || 'similar_object')},
                     样例图=${escapeHtml(item.source_image_id || '-')},
                     实例=${escapeHtml(item.sample_id || '-')},
-                    相似度=<strong>${Number(item.similarity_score ?? 0).toFixed(3)}</strong>,
-                    SAM分数=${Number(item.score ?? 0).toFixed(3)},
-                    组合分=${Number(item.combined_score ?? 0).toFixed(3)},
+                    SAM分数=<strong>${Number(item.sam_score ?? item.score ?? 0).toFixed(3)}</strong>,
                     框=[${(item.bnd_points || []).join(', ')}],
                     粘贴区域=${Array.isArray(item.paste_bnd_points) ? `[${item.paste_bnd_points.join(', ')}]` : '默认'}
                 </div>`
@@ -2378,6 +2125,8 @@
                 : '-';
             const promptText = data.prompt || queryResults.find((item) => item.prompt)?.prompt || '';
             const translatedPromptText = data.translated_prompt || queryResults.find((item) => item.translated_prompt)?.translated_prompt || '';
+            const rawScoreType = data.profile?.score_type || queryResults[0]?.profile?.score_type || '';
+            const scoreTypeLabel = rawScoreType === 'sam_grounding_score' ? 'SAM 分割置信度' : (rawScoreType || 'SAM 分割置信度');
 
             resultInfo.innerHTML = `
                 <div class="info-card">
@@ -2405,8 +2154,8 @@
                     <div class="info-value">${Number(data.nms_iou ?? queryResults[0]?.nms_iou ?? 0.45).toFixed(2)}</div>
                 </div>
                 <div class="info-card">
-                    <div class="info-label">相似度阈值</div>
-                    <div class="info-value">${Number(data.similarity_threshold ?? queryResults[0]?.similarity_threshold ?? 0).toFixed(2)}</div>
+                    <div class="info-label">分数类型</div>
+                    <div class="info-value">${escapeHtml(scoreTypeLabel)}</div>
                 </div>
                 <div class="info-card">
                     <div class="info-label">样图框来源</div>
@@ -2442,20 +2191,6 @@
                 resultImage.removeAttribute('src');
             }
 
-            const debugImages = queryResults.flatMap((item) => Array.isArray(item.concat_prompt_images) ? item.concat_prompt_images : []);
-            if (debugImages.length) {
-                concatDebugSection.style.display = 'block';
-                concatDebugImages.innerHTML = debugImages.map((name, index) => (
-                    `<div class="query-result-card">
-                        <div class="query-result-title">拼接图 #${index + 1}</div>
-                        <img src="/results/${encodeURIComponent(name)}?t=${Date.now()}" class="preview-image" alt="拼接调试图 ${index + 1}">
-                    </div>`
-                )).join('');
-            } else {
-                concatDebugSection.style.display = 'none';
-                concatDebugImages.innerHTML = '';
-            }
-
             queryResultsList.innerHTML = queryResults.map((item, index) => {
                 const labels = Array.isArray(item.pic_labels) ? item.pic_labels : [];
                 const topItems = renderTopItems(labels);
@@ -2484,6 +2219,14 @@
                 return null;
             }
             return values;
+        }
+
+        function appendSharedNativePromptParams(formData) {
+            formData.append('top_k', document.getElementById('similarTopK').value || '5');
+            formData.append('sam_threshold', similarSamThreshold.value || '0.6');
+            formData.append('similarity_threshold', similarSamThreshold.value || '0.6');
+            formData.append('nms_iou', '0.45');
+            formData.append('polygon_simplify_epsilon', '2.0');
         }
 
         function buildMultiSampleFormData() {
@@ -2551,37 +2294,17 @@
 
             queryFiles.forEach((file) => formData.append('query_file', file));
             formData.append('sample_meta', JSON.stringify(sampleMeta));
-            formData.append('top_k', document.getElementById('similarTopK').value || '5');
-            formData.append('similarity_threshold', similarityThreshold.value || '0.6');
-            formData.append('sam_threshold', similarSamThreshold.value || '0.2');
-            formData.append('nms_iou', '0.45');
-            formData.append('polygon_simplify_epsilon', '2.0');
+            appendSharedNativePromptParams(formData);
             return formData;
         }
 
         similarForm.addEventListener('submit', async function(e) {
             e.preventDefault();
 
-            const isMultiSampleMode = multiSampleToggle.checked;
-            const refBoxInput = document.getElementById('referenceBndPoints');
-            if (!isMultiSampleMode && (!refBoxInput.value || !refBoxInput.value.trim())) {
-                error.textContent = '请先填写样图目标框，格式 x,y,w,h';
-                error.classList.add('show');
-                return;
-            }
-
             let formData = null;
-            let endpoint = '/similar-detect';
+            const endpoint = '/multi-similar-detect';
             try {
-                if (isMultiSampleMode) {
-                    endpoint = '/multi-similar-detect';
-                    formData = buildMultiSampleFormData();
-                } else {
-                    formData = new FormData(similarForm);
-                    if (similarModeSelect.value === 'same_image_prompt') {
-                        formData.delete('query_file');
-                    }
-                }
+                formData = buildMultiSampleFormData();
             } catch (err) {
                 error.textContent = err.message;
                 error.classList.add('show');
@@ -2703,8 +2426,6 @@
                     referenceResultImage.style.display = 'none';
                     referenceResultImage.removeAttribute('src');
                     queryResultsList.innerHTML = '';
-                    concatDebugSection.style.display = 'none';
-                    concatDebugImages.innerHTML = '';
                     resultSection.classList.add('show');
                 } else {
                     error.textContent = `错误: ${data.detail || '请求失败'}`;

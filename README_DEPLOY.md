@@ -170,8 +170,8 @@ cd /expdata/givap/research/sam3/deploy3.3
 - `POST /v1/segmentations`
 - `POST /v1/box-segmentations`
 - `POST /v1/similar-object-segmentations`
-- `POST /v1/concat-prompt-segmentations`
-- `POST /similar-detect`
+- `POST /similar-detect`（兼容旧 multipart 单样例/同图接口）
+- `POST /multi-similar-detect`（前端当前统一使用的样例识别接口）
 - `GET /health`
 - `GET /api-list.json`
 - `GET /api-list`
@@ -188,7 +188,6 @@ cd /expdata/givap/research/sam3/deploy3.3
 - `SAM3_INFER_DTYPE`：`bfloat16`、`float16`、`float32`
 - `SAM3_ULTRALYTICS_IMGSZ`：默认 `1036`（Ultralytics SAM3 stride 14 的倍数）
 - `SAM3_ULTRALYTICS_IOU`：默认 `0.7`
-- `SAM3_CONCAT_PROMPT_SCALES`：默认 `1.0`，只生成一张拼接调试图；如需多尺度可设为 `0.6,1.0,1.4`
 - `SAM3_ARGOS_MODEL_DIR`：默认 `./argos_models`
 - `ARGOS_PACKAGES_DIR`：默认 `./argos-packages`
 - `SAM3_ARGOS_AUTO_INSTALL=0`
@@ -198,9 +197,9 @@ cd /expdata/givap/research/sam3/deploy3.3
 
 `/v1/box-segmentations` 仍接收旧版 `[x, y, w, h]`，内部会转换成 Ultralytics 需要的 `[x1, y1, x2, y2]`，返回保持旧版格式。
 
-`/v1/similar-object-segmentations`、`/v1/concat-prompt-segmentations` 和 `/similar-detect` 实现“样图 A + A 中目标框 -> 待识别图 B 中相似目标”的流程，返回 `pic_labels[].bnd_points` 和 `pic_labels[].polygon_points`。
+`/v1/similar-object-segmentations`、`/similar-detect` 和 `/multi-similar-detect` 实现“样图 A + A 中目标框 -> 待识别图 B 中相似目标”的流程，返回 `pic_labels[].bnd_points` 和 `pic_labels[].polygon_points`。前端统一使用 `/multi-similar-detect`：普通单样例就是只提交一个正样本实例，多类别/多样例则继续追加标签、样例和实例框。
 
-相似识别支持两种模式：
+兼容 JSON/旧 multipart 接口仍支持两种模式：
 
-- `similar_mode=concat_prompt`（默认）：先用 SAM3 分割样图目标并抠出目标 patch，把 patch 拼到待识别图旁边，再用 SAM3 visual prompt 在拼接图中找相似目标。可选 `prompt` 文本描述；拼接模式填写后会把该描述和示例框一起传给 Ultralytics SAM3。返回 `concat_prompt_images`，前端会显示拼接调试图，方便确认拼接是否正确。
-- `similar_mode=feature_match`：跨图原生 visual prompt。先把样图框编码成 reference prompt embedding，再直接在待识别图上跑 SAM3 grounding，分数使用模型原生 dot-product scoring，不再走 cosine 粗筛。
+- `similar_mode=feature_match`（默认）：跨图原生 visual prompt。先把样图框编码成 reference prompt embedding，再直接在待识别图上跑 SAM3 grounding。
+- `similar_mode=same_image_prompt`：示例框和待找目标在同一张图，直接使用 SAM3 原生 visual prompt。

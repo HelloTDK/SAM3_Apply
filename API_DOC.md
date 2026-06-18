@@ -6,7 +6,7 @@
 
 - prompt 文本识别：按文本类别找目标。
 - 画区域 / box 分割：用户给框，SAM3 分割框内目标。
-- 示例目标相似识别：包括拼接图识别、同图拉框识别、特征匹配识别。
+- 示例目标相似识别：包括跨图特征匹配识别、同图拉框识别。
 
 坐标约定：
 
@@ -29,7 +29,7 @@ Authorization: Bearer <api_key>
 X-API-Key: <api_key>
 ```
 
-`/detect`、`/similar-detect` 是前端测试用 multipart 接口，当前代码未强制 API Key。
+`/detect`、`/similar-detect`、`/multi-similar-detect` 是 multipart 测试接口，当前代码未强制 API Key。前端相似识别统一使用 `/multi-similar-detect`，`/similar-detect` 仅作为旧客户端兼容入口保留。
 
 ## 1. Prompt 文本识别
 
@@ -204,16 +204,12 @@ Authorization: Bearer <api_key>
 
 | `similar_mode` | 说明 |
 | --- | --- |
-| `concat_prompt` | 拼接图识别。先分割示例目标并抠图，再拼到目标图旁边，用 SAM3 visual prompt 找相似目标；可选 `prompt` 作为 box+text 约束 |
-| `same_image_prompt` | 同图拉框识别。示例框和待找目标在同一张图，直接使用 SAM3 原生 visual prompt |
-| `feature_match` | 跨图原生 visual prompt。先把参考框编码成 reference prompt，再直接在目标图上跑 SAM3 grounding，不再使用 cosine 特征粗筛 |
+| `feature_match` | 跨图原生 visual prompt。先把参考框编码成 reference prompt，再直接在目标图上跑 SAM3 grounding。 |
+| `same_image_prompt` | 同图拉框识别。示例框和待找目标在同一张图，直接使用 SAM3 原生 visual prompt。 |
 
-### 3.1 拼接图识别
+### 3.1 跨图 Feature Match 识别
 
 `POST /v1/similar-object-segmentations`
-
-如果调用方明确要使用“拼接图 + prompt 描述 + 示例框”，也可以调用便捷接口
-`POST /v1/concat-prompt-segmentations`，请求字段与本节一致，但 `prompt` 必填且 `similar_mode` 固定为 `concat_prompt`。
 
 请求体：
 
@@ -225,9 +221,10 @@ Authorization: Bearer <api_key>
   "reference_bnd_points": [120, 80, 260, 300],
   "prompt": "红色安全帽",
   "top_k": 5,
-  "similarity_threshold": 0.35,
+  "sam_threshold": 0.6,
+  "similarity_threshold": 0.6,
   "polygon_simplify_epsilon": 2.0,
-  "similar_mode": "concat_prompt"
+  "similar_mode": "feature_match"
 }
 ```
 
@@ -243,8 +240,9 @@ Authorization: Bearer <api_key>
   ],
   "reference_bnd_points": [120, 80, 260, 300],
   "top_k": 5,
-  "similarity_threshold": 0.35,
-  "similar_mode": "concat_prompt"
+  "sam_threshold": 0.6,
+  "similarity_threshold": 0.6,
+  "similar_mode": "feature_match"
 }
 ```
 
@@ -258,31 +256,34 @@ Authorization: Bearer <api_key>
 | `reference_bnd_points` | 是 | array | 示例图 A 中目标框 `[x,y,w,h]` |
 | `prompt` | 否 | string | 可选相似目标文本描述；拼接模式填写后会和示例框一起传给 SAM3，中文会自动翻译成英文 |
 | `top_k` | 否 | integer | 返回最多目标数，默认 `5`，范围 `1-20` |
-| `similarity_threshold` | 否 | number | 相似度阈值，默认 `0.35` |
+| `sam_threshold` | 否 | number | SAM3 grounding 分数阈值，默认 `0.6` |
+| `similarity_threshold` | 否 | number | 兼容旧客户端字段；当前不再执行余弦相似度过滤 |
 | `polygon_simplify_epsilon` | 否 | number | 多边形简化参数，默认 `2.0` |
-| `similar_mode` | 否 | string | 这里填 `concat_prompt` |
+| `similar_mode` | 否 | string | `feature_match`、`same_image_prompt` |
 
 响应关键字段：
 
 ```json
 {
   "success": true,
-  "similar_mode": "concat_prompt",
+  "similar_mode": "feature_match",
   "prompt": "红色安全帽",
   "translated_prompt": "red helmet",
   "box_text_prompt_enabled": true,
   "reference_bnd_points": [120.0, 80.0, 260.0, 300.0],
   "top_k": 5,
-  "similarity_threshold": 0.35,
+  "sam_threshold": 0.6,
+  "similarity_threshold": 0.6,
   "num_candidates": 12,
   "num_matches": 3,
   "pic_labels": [
     {
       "category": "similar_object",
       "score": 0.71,
-      "similarity_score": 0.62,
-      "combined_score": 0.6335,
-      "coarse_similarity": 0.62,
+      "sam_score": 0.71,
+      "similarity_score": 0.71,
+      "combined_score": 0.71,
+      "coarse_similarity": 0.71,
       "bnd_points": [520.0, 220.0, 80.0, 160.0],
       "polygon_points": [[521.0, 221.0], [600.0, 224.0]],
       "mask_area": 6700,
@@ -290,7 +291,6 @@ Authorization: Bearer <api_key>
     }
   ],
   "reference_result_image": "result_20260521_101000_000001.jpg",
-  "concat_prompt_images": ["concat_prompt_similar-001_1_20260521_101000_000002.jpg"],
   "result_image": "result_20260521_101000_000003.jpg",
   "processing_time_ms": 1800
 }
@@ -322,7 +322,8 @@ http://192.168.100.25:8006/results/result_20260521_101000_000003.jpg
   "reference_image_base64": "data:image/jpeg;base64,/9j/...",
   "reference_bnd_points": [120, 80, 260, 300],
   "top_k": 5,
-  "similarity_threshold": 0.35,
+  "sam_threshold": 0.6,
+  "similarity_threshold": 0.6,
   "polygon_simplify_epsilon": 2.0,
   "similar_mode": "same_image_prompt"
 }
@@ -347,8 +348,9 @@ http://192.168.100.25:8006/results/result_20260521_101000_000003.jpg
     {
       "category": "similar_object",
       "score": 0.82,
-      "similarity_score": 0.91,
-      "combined_score": 0.8965,
+      "sam_score": 0.82,
+      "similarity_score": 0.82,
+      "combined_score": 0.82,
       "bnd_points": [120.0, 80.0, 260.0, 300.0],
       "polygon_points": [[121.0, 81.0], [360.0, 90.0]],
       "mask_area": 32000,
@@ -362,7 +364,7 @@ http://192.168.100.25:8006/results/result_20260521_101000_000003.jpg
 
 ### 3.3 Feature Match 识别
 
-请求和拼接图识别一致，只把 `similar_mode` 改为 `feature_match`：
+请求和跨图识别一致，`similar_mode` 填 `feature_match`：
 
 ```json
 {
@@ -371,7 +373,8 @@ http://192.168.100.25:8006/results/result_20260521_101000_000003.jpg
   "query_image_base64": "data:image/jpeg;base64,/9j/...",
   "reference_bnd_points": [120, 80, 260, 300],
   "top_k": 5,
-  "similarity_threshold": 0.35,
+  "sam_threshold": 0.6,
+  "similarity_threshold": 0.6,
   "similar_mode": "feature_match"
 }
 ```
@@ -380,55 +383,54 @@ http://192.168.100.25:8006/results/result_20260521_101000_000003.jpg
 
 ## 4. Multipart 相似识别接口
 
-前端页面使用 `POST /similar-detect`。它的能力和 `/v1/similar-object-segmentations` 基本一致，只是用 `multipart/form-data` 上传图片。
+前端页面统一使用 `POST /multi-similar-detect`。普通单样例就是 `sample_meta` 里只有一个正样本实例；继续添加标签、样例或实例即可扩展为多类别、多样例识别。
 
-### 4.1 拼接图识别
+### 4.1 跨图 Feature Match 识别
 
 ```bash
-curl -X POST 'http://192.168.100.25:8006/similar-detect' \
-  -F 'reference_file=@/path/to/ref.jpg' \
+curl -X POST 'http://192.168.100.25:8006/multi-similar-detect' \
+  -F 'sample_file=@/path/to/ref.jpg' \
   -F 'query_file=@/path/to/query.jpg' \
-  -F 'reference_bnd_points=120,80,260,300' \
-  -F 'prompt=红色安全帽' \
+  -F 'sample_meta=[{"file_index":0,"sample_type":"positive","category":"安全帽","reference_bnd_points":[120,80,260,300],"prompt":"红色安全帽"}]' \
   -F 'top_k=5' \
-  -F 'similarity_threshold=0.35' \
-  -F 'similar_mode=concat_prompt'
+  -F 'sam_threshold=0.6'
 ```
 
 多张目标图可重复传 `query_file`：
 
 ```bash
-curl -X POST 'http://192.168.100.25:8006/similar-detect' \
-  -F 'reference_file=@/path/to/ref.jpg' \
+curl -X POST 'http://192.168.100.25:8006/multi-similar-detect' \
+  -F 'sample_file=@/path/to/ref.jpg' \
   -F 'query_file=@/path/to/query1.jpg' \
   -F 'query_file=@/path/to/query2.jpg' \
-  -F 'reference_bnd_points=120,80,260,300' \
-  -F 'similar_mode=concat_prompt'
+  -F 'sample_meta=[{"file_index":0,"sample_type":"positive","category":"目标","reference_bnd_points":[120,80,260,300]}]'
 ```
 
-### 4.2 同图拉框识别
+### 4.2 兼容旧同图拉框接口
 
 ```bash
 curl -X POST 'http://192.168.100.25:8006/similar-detect' \
   -F 'reference_file=@/path/to/image.jpg' \
   -F 'reference_bnd_points=120,80,260,300' \
   -F 'top_k=5' \
-  -F 'similarity_threshold=0.35' \
+  -F 'sam_threshold=0.6' \
+  -F 'similarity_threshold=0.6' \
   -F 'similar_mode=same_image_prompt'
 ```
+
+该接口用于旧页面或旧脚本；新前端不再提供单独模式开关。
 
 字段说明：
 
 | 字段 | 必填 | 类型 | 说明 |
 | --- | --- | --- | --- |
-| `reference_file` | 是 | file | 示例图；同图模式下就是待识别图 |
-| `query_file` | 跨图模式必填 | file/list | 目标图；`same_image_prompt` 不需要 |
-| `reference_bnd_points` | 是 | string | 示例框，格式 `x,y,w,h` |
-| `prompt` | 否 | string | 可选相似目标文本描述；`concat_prompt` 模式下填写后会和示例框一起传给 SAM3 |
+| `sample_file` | 是 | file/list | 样例图；可重复传多张 |
+| `query_file` | 是 | file/list | 待识别图；可重复传多张 |
+| `sample_meta` | 是 | string | JSON 数组，描述每个样例实例的 `file_index`、正负样本、类别和框 |
 | `top_k` | 否 | integer | 默认 `5` |
-| `similarity_threshold` | 否 | number | 默认 `0.35` |
+| `sam_threshold` | 否 | number | SAM3 grounding 分数阈值，默认 `0.6` |
+| `similarity_threshold` | 否 | number | 兼容旧客户端字段；当前不再执行余弦相似度过滤 |
 | `polygon_simplify_epsilon` | 否 | number | 默认 `2.0` |
-| `similar_mode` | 否 | string | `concat_prompt`、`same_image_prompt`、`feature_match` |
 | `pic_id` | 否 | string | 图片 ID |
 
 ## 5. 常见错误
@@ -454,6 +456,7 @@ curl -X POST 'http://192.168.100.25:8006/similar-detect' \
 
 - 只按类别找目标：用 `/v1/segmentations`，也就是 prompt 文本识别。
 - 用户已经画了一个框，只需要分割这个框内目标：用 `/v1/box-segmentations`。
-- 示例目标和搜索目标在同一张图：用 `similar_mode=same_image_prompt`。
-- 示例图 A + 目标图 B 找相似目标：优先用 `similar_mode=concat_prompt`。
-- 需要跨图但又不想走拼接图方案时，可尝试 `similar_mode=feature_match`。
+- 示例图 A + 目标图 B 找相似目标：推荐使用 `/multi-similar-detect`。
+- 普通单样例：`sample_meta` 只放一个正样本实例。
+- 多类别/多样例：继续追加标签、样例图和实例框。
+- 同图拉框识别：旧接口仍可用 `similar_mode=same_image_prompt`。
