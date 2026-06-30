@@ -2,11 +2,12 @@
 
 服务地址示例：`http://192.168.100.25:8006`
 
-本文档只覆盖当前常用的三类能力：
+本文档只覆盖当前常用的四类能力：
 
 - prompt 文本识别：按文本类别找目标。
 - 画区域 / box 分割：用户给框，SAM3 分割框内目标。
 - 示例目标相似识别：包括跨图特征匹配识别、同图拉框识别。
+- 样例图标注：通过远程 `sample_url` 和 `data_url` 批量标注图片，避免传输大量 Base64。
 
 坐标约定：
 
@@ -198,7 +199,12 @@ Authorization: Bearer <api_key>
 
 ## 3. 示例目标相似识别
 
-统一使用 `POST /v1/similar-object-segmentations`，通过 `similar_mode` 切换模式。
+Base64 小请求使用 `POST /v1/similar-object-segmentations`，通过 `similar_mode` 切换模式。
+
+大批量样例图标注不要使用 Base64。样例图 1-300 张、待标注图 1-5000 张时，使用后面的 URL/Manifest 接口：
+
+- 单张目标图：`POST /v1/similar-object-segmentations/by-url`
+- 批量目标图：`POST /v1/similar-object-segmentations/tasks`
 
 支持模式：
 
@@ -381,6 +387,364 @@ http://192.168.100.25:8006/results/result_20260521_101000_000003.jpg
 
 该模式会返回 `profile`，包含 reference prompt 编码、query grounding 和 NMS 后候选数量，便于排查慢请求。
 
+### 3.4 URL 样例图单张标注
+
+用途：上层服务已经有远程图片路径，不希望把样例图和待标注图转成 Base64。该接口由 SAM3 服务直接下载 `sample_url` 和 `query_image_url`。
+
+`POST /v1/similar-object-segmentations/by-url`
+
+请求头：
+
+```http
+Content-Type: application/json
+Authorization: Bearer <api_key>
+```
+
+请求体：
+
+```json
+{
+  "pic_id": "image-001",
+  "download_url": "http://192.168.100.118:8092",
+  "sample_url": "/group1/default/path/sample.txt",
+  "query_image_url": "/group1/default/path/image.jpg",
+  "top_k": 5,
+  "sam_threshold": 0.6,
+  "similarity_threshold": 0.6,
+  "nms_iou": 0.45,
+  "polygon_simplify_epsilon": 2.0,
+  "return_result_image": false
+}
+```
+
+字段说明：
+
+| 字段 | 必填 | 类型 | 说明 |
+| --- | --- | --- | --- |
+| `pic_id` | 是 | string | 客户端图片 ID |
+| `download_url` | 是 | string | 下载服务根地址。相对路径会拼接成 `{download_url}/{path}` |
+| `sample_url` | 是 | string | 样例标注文件路径或完整 HTTP URL |
+| `query_image_url` | 是 | string | 待标注图片路径或完整 HTTP URL |
+| `top_k` | 否 | integer | 每个类别最多保留结果数，默认 `5`，范围 `1-50` |
+| `sam_threshold` | 否 | number | SAM3 grounding 分数阈值，默认 `0.6` |
+| `similarity_threshold` | 否 | number | 兼容字段；当前不执行余弦相似度过滤 |
+| `nms_iou` | 否 | number | 最终按类别 NMS 阈值，默认 `0.45` |
+| `polygon_simplify_epsilon` | 否 | number | 多边形简化参数，默认 `2.0` |
+| `return_result_image` | 否 | boolean | 是否生成可视化结果图；批量场景建议保持 `false` |
+
+响应示例：
+
+```json
+{
+  "model": "ultralytics-sam3",
+  "pic_id": "image-001",
+  "success": true,
+  "similar_mode": "multi_visual_prompt_url",
+  "top_k": 5,
+  "top_k_scope": "per_category",
+  "sam_threshold": 0.6,
+  "nms_iou": 0.45,
+  "num_samples": 4,
+  "num_positive_samples": 1,
+  "num_negative_samples": 3,
+  "num_groups": 1,
+  "num_candidates": 12,
+  "num_matches": 2,
+  "category_counts": {
+    "person": 2
+  },
+  "pic_labels": [
+    {
+      "category": "person",
+      "sample_id": "person_0001",
+      "sample_ids": ["person_0001"],
+      "source_image_id": "0000000000000018",
+      "source_image_ids": ["0000000000000018"],
+      "score": 0.713421,
+      "sam_score": 0.713421,
+      "similarity_score": 0.713421,
+      "combined_score": 0.713421,
+      "coarse_similarity": 0.713421,
+      "bnd_points": [520.0, 220.0, 80.0, 160.0],
+      "polygon_points": [[521.0, 221.0], [600.0, 224.0]],
+      "mask_area": 6700
+    }
+  ],
+  "result_image": null,
+  "created": 1779340000,
+  "processing_time_ms": 1800,
+  "profile": {
+    "sample_cache_hit": false,
+    "reference_feature_reuse_enabled": true,
+    "reference_feature_extract_count": 1,
+    "reference_prompt_encode_ms": 96,
+    "grounding_forward_ms": 420
+  }
+}
+```
+
+### 3.5 URL 样例图批量任务
+
+用途：一次任务包含多张样例图和大量待标注图片。该接口异步执行，避免一个 HTTP 请求长时间阻塞，也避免一次性传输大量 Base64。
+
+创建任务：
+
+`POST /v1/similar-object-segmentations/tasks`
+
+请求体：
+
+```json
+{
+  "task_id": "BATCH-LM-001",
+  "download_url": "http://192.168.100.118:8092",
+  "data_type": 0,
+  "data_url": "/group1/default/path/images.txt",
+  "sample_url": "/group1/default/path/sample.txt",
+  "infer_batch_size": 16,
+  "top_k": 5,
+  "sam_threshold": 0.6,
+  "similarity_threshold": 0.6,
+  "nms_iou": 0.45,
+  "polygon_simplify_epsilon": 2.0,
+  "return_result_image": false,
+  "result_ttl_seconds": 86400
+}
+```
+
+字段说明：
+
+| 字段 | 必填 | 类型 | 说明 |
+| --- | --- | --- | --- |
+| `task_id` | 是 | string | 任务 ID；重复 running 任务会返回错误 |
+| `download_url` | 是 | string | 下载服务根地址 |
+| `data_type` | 否 | integer | 当前仅支持 `0`，表示图片清单 |
+| `data_url` | 是 | string | 待标注图片清单路径或完整 HTTP URL |
+| `sample_url` | 是 | string | 样例标注文件路径或完整 HTTP URL |
+| `infer_batch_size` | 否 | integer | 预留分批参数，默认 `16`，范围 `1-64` |
+| `top_k` | 否 | integer | 每个类别最多保留结果数，默认 `5` |
+| `sam_threshold` | 否 | number | SAM3 grounding 分数阈值，默认 `0.6` |
+| `similarity_threshold` | 否 | number | 兼容字段；当前不执行余弦相似度过滤 |
+| `nms_iou` | 否 | number | 最终按类别 NMS 阈值，默认 `0.45` |
+| `polygon_simplify_epsilon` | 否 | number | 多边形简化参数，默认 `2.0` |
+| `return_result_image` | 否 | boolean | 是否生成可视化结果图；5000 张批量时建议 `false` |
+| `result_ttl_seconds` | 否 | integer | 完成/失败/取消后结果保留时间，默认 `86400` |
+
+创建任务响应：
+
+```json
+{
+  "success": true,
+  "task_id": "BATCH-LM-001",
+  "status": "pending",
+  "total": 0,
+  "processed": 0,
+  "success_count": 0,
+  "fail_count": 0,
+  "message": "pending",
+  "created": 1779340000,
+  "updated": 1779340000
+}
+```
+
+查询任务状态：
+
+`GET /v1/similar-object-segmentations/tasks/{task_id}`
+
+响应示例：
+
+```json
+{
+  "success": true,
+  "task_id": "BATCH-LM-001",
+  "status": "running",
+  "total": 5000,
+  "processed": 640,
+  "success_count": 632,
+  "fail_count": 8,
+  "message": "running",
+  "created": 1779340000,
+  "updated": 1779340300
+}
+```
+
+`status` 取值：
+
+| status | 说明 |
+| --- | --- |
+| `pending` | 任务已创建，等待执行 |
+| `running` | 任务执行中 |
+| `completed` | 任务完成 |
+| `failed` | 任务整体失败 |
+| `cancelled` | 任务已取消 |
+
+分页获取结果 / Long Polling：
+
+`GET /v1/similar-object-segmentations/tasks/{task_id}/results?offset=0&limit=50`
+
+也可以使用 long polling：
+
+`GET /v1/similar-object-segmentations/tasks/{task_id}/results?offset=0&limit=50&wait_timeout=10`
+
+字段说明：
+
+| 参数 | 必填 | 类型 | 说明 |
+| --- | --- | --- | --- |
+| `offset` | 否 | integer | 已消费结果数量，默认 `0` |
+| `limit` | 否 | integer | 单页最多返回数量，默认 `50`，最大 `500` |
+| `wait_timeout` | 否 | number | Long polling 等待秒数，默认 `0`；最大按服务端限制为 `60` 秒 |
+
+Long polling 语义：
+
+- 如果 `offset` 后已经有新结果，立即返回。
+- 如果暂时没有新结果且任务仍是 `pending/running`，服务端最多等待 `wait_timeout` 秒。
+- 等待期间一旦产生新结果，立即返回。
+- 如果等待超时仍无新结果，返回 `items=[]`，并带上当前任务进度。
+- 如果任务进入 `completed/failed/cancelled`，立即返回当前剩余结果和最终状态。
+
+响应示例：
+
+```json
+{
+  "success": true,
+  "task_id": "BATCH-LM-001",
+  "status": "running",
+  "processed": 640,
+  "success_count": 632,
+  "fail_count": 8,
+  "message": "running",
+  "offset": 0,
+  "limit": 50,
+  "total": 5000,
+  "result_total": 640,
+  "items": [
+    {
+      "pic_id": "image-001",
+      "status": 1,
+      "message": "标注成功",
+      "pic_labels": [
+        {
+          "category": "person",
+          "sample_ids": ["person_0001"],
+          "source_image_ids": ["0000000000000018"],
+          "score": 0.713421,
+          "bnd_points": [520.0, 220.0, 80.0, 160.0],
+          "polygon_points": [[521.0, 221.0], [600.0, 224.0]]
+        }
+      ]
+    }
+  ]
+}
+```
+
+上层服务轮询策略：
+
+- 上层创建任务成功后，直接调用 long polling results 接口拉取进度和增量结果。
+- 当前训练服务上层默认使用 `wait_timeout=10`，与训练服务心跳进度上报节奏保持一致。
+- 上层字段 `sam_task_poll_interval` 可覆盖默认 long polling 等待时间；例如传 `10.0` 表示最多等待 10 秒。
+- 每次响应都会包含 `processed/total/status`，上层可直接同步上报现有训练服务进度。
+- 上层用自己维护的 `offset` 调用 `GET /tasks/{task_id}/results?offset=<已消费数量>&limit=<batch_size>&wait_timeout=10` 拉取新结果。
+- `items=[]` 表示本次等待期间没有新结果，不是错误；上层收到响应后继续发起下一次 long polling。
+- 当状态为 `completed`、`failed`、`cancelled` 时，上层会最后再拉一次 results，避免遗漏最后一批结果。
+
+取消任务：
+
+`DELETE /v1/similar-object-segmentations/tasks/{task_id}`
+
+响应示例：
+
+```json
+{
+  "success": true,
+  "task_id": "BATCH-LM-001",
+  "status": "cancelled",
+  "message": "cancel requested"
+}
+```
+
+### 3.6 `sample_url` 文件格式
+
+`sample_url` 内容必须是 JSON 数组。样例图可以是相对路径，也可以是完整 HTTP URL。
+
+```json
+[
+  {
+    "label_id": "person",
+    "label_sample_data": [
+      {
+        "image_url": "/group1/default/20251217/15/25/8/0000000000000018.jpg",
+        "image_id": "sample-image-001",
+        "image_mark": [
+          {
+            "mark_info": "{\"rotation\":0,\"x\":408.068,\"width\":56.644,\"y\":361.828,\"height\":236.98}",
+            "sample_type": "1"
+          },
+          {
+            "mark_info": "{\"rotation\":0,\"x\":435.812,\"width\":83.188,\"y\":339.864,\"height\":201.144}",
+            "sample_type": "0"
+          }
+        ]
+      }
+    ]
+  }
+]
+```
+
+字段说明：
+
+| 字段 | 必填 | 类型 | 说明 |
+| --- | --- | --- | --- |
+| `label_id` | 是 | string | 类别名称，会作为输出 `pic_labels[].category` |
+| `label_sample_data[].image_url` | 是 | string | 样例图路径或完整 HTTP URL |
+| `label_sample_data[].image_id` | 否 | string | 样例图 ID；缺省时从文件名生成 |
+| `image_mark[].mark_info` | 是 | string/object | 样例框信息，必须包含 `x/y/width/height` |
+| `image_mark[].sample_type` | 否 | string | `"1"` 表示正样本，`"0"` 表示负样本；缺省按正样本处理 |
+
+限制和规则：
+
+- 最多支持 `300` 张样例图。
+- 最多支持 `2000` 个样例实例。
+- 至少需要一个正样本。
+- `rotation` 当前接受但不参与计算；坐标仍按水平矩形 `[x,y,width,height]` 处理。
+- 样例图会按图片聚合，同一张样例图只提取一次特征。
+- 样例 prompt embedding 会缓存；相同 `download_url + sample_url + sample_url内容 + top_k` 命中缓存时，不重复下载样例图和编码样例 prompt。
+
+### 3.7 `data_url` 文件格式
+
+`data_url` 支持 JSON 数组：
+
+```json
+[
+  {
+    "image_id": "image-001",
+    "image_url": "/group1/default/path/image001.jpg"
+  },
+  {
+    "image_id": "image-002",
+    "image_url": "/group1/default/path/image002.jpg"
+  }
+]
+```
+
+也支持纯文本格式，每行一个 URL：
+
+```text
+/group1/default/path/image001.jpg
+/group1/default/path/image002.jpg
+```
+
+兼容旧的 `image_id=remote_path` 格式：
+
+```text
+image-001=/group1/default/path/image001.jpg
+image-002=/group1/default/path/image002.jpg
+```
+
+限制：
+
+- 当前 URL 批量任务仅支持图片清单，即 `data_type=0`。
+- 单任务最多 `5000` 张待标注图片。
+- 每张图片大小受服务端 `SAM3_MAX_IMAGE_BYTES` 限制，默认 `20MB`。
+
 ## 4. Multipart 相似识别接口
 
 前端页面统一使用 `POST /multi-similar-detect`。普通单样例就是 `sample_meta` 里只有一个正样本实例；继续添加标签、样例或实例即可扩展为多类别、多样例识别。
@@ -433,7 +797,16 @@ curl -X POST 'http://192.168.100.25:8006/similar-detect' \
 | `polygon_simplify_epsilon` | 否 | number | 默认 `2.0` |
 | `pic_id` | 否 | string | 图片 ID |
 
-## 5. 常见错误
+## 5. Base64 和 URL 接口选择
+
+推荐：
+
+- 小规模调试、旧客户端：使用 Base64 JSON 接口 `/v1/similar-object-segmentations` 或 multipart `/multi-similar-detect`。
+- 上层服务已有远程图片路径，且单张待标注图：使用 `/v1/similar-object-segmentations/by-url`。
+- 1-300 张样例图、1-5000 张待标注图：使用 `/v1/similar-object-segmentations/tasks`。
+- 不建议把大量图片放入 `query_image_base64_list`，Base64 会膨胀请求体并增加内存峰值。
+
+## 6. 常见错误
 
 ### 400
 
@@ -443,20 +816,33 @@ curl -X POST 'http://192.168.100.25:8006/similar-detect' \
 - `reference_bnd_points` 不是 4 个数字。
 - 非 `same_image_prompt` 模式没有传 `query_image_base64` / `query_file`。
 - 框宽高小于等于 0。
+- URL 样例标注缺少 `download_url`、`sample_url`、`query_image_url` 或 `data_url`。
+- `sample_url` 不是合法 JSON 数组，或没有任何正样本。
+- `mark_info` 缺少 `x/y/width/height`，或框宽高小于等于 0。
+- URL 批量任务 `data_type` 不是 `0`。
+- `task_id` 对应的任务正在运行，重复创建同名任务。
 
 ### 401
 
 `/v1/*` 接口未传 API Key，或 API Key 过期/无效。
 
+### 404
+
+常见原因：
+
+- 查询或取消不存在的 URL 批量任务。
+
 ### 500
 
 模型推理失败。建议先查看服务日志，重点看 CUDA、显存、checkpoint 路径和 Ultralytics 版本。
 
-## 6. 推荐调用选择
+## 7. 推荐调用选择
 
 - 只按类别找目标：用 `/v1/segmentations`，也就是 prompt 文本识别。
 - 用户已经画了一个框，只需要分割这个框内目标：用 `/v1/box-segmentations`。
-- 示例图 A + 目标图 B 找相似目标：推荐使用 `/multi-similar-detect`。
-- 普通单样例：`sample_meta` 只放一个正样本实例。
-- 多类别/多样例：继续追加标签、样例图和实例框。
+- 示例图 A + 目标图 B 小规模调试：推荐使用 `/multi-similar-detect`。
+- 远程样例文件 + 单张远程目标图：推荐使用 `/v1/similar-object-segmentations/by-url`。
+- 远程样例文件 + 批量远程目标图：推荐使用 `/v1/similar-object-segmentations/tasks`。
+- 普通单样例 multipart 调试：`sample_meta` 只放一个正样本实例。
+- 多类别/多样例 multipart 调试：继续追加标签、样例图和实例框。
 - 同图拉框识别：旧接口仍可用 `similar_mode=same_image_prompt`。

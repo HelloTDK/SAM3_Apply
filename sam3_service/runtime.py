@@ -35,6 +35,7 @@ from .config import (
     ULTRALYTICS_IMGSZ,
     ULTRALYTICS_IOU,
     ULTRALYTICS_VERBOSE,
+    VISUAL_PROMPT_MAX_CANDIDATES,
 )
 from .image_utils import (
     bbox_iou_xywh,
@@ -227,6 +228,22 @@ def _elapsed_ms(start_time: float) -> int:
 def _native_visual_prompt_score_threshold(sam_threshold: float) -> float:
     """原生 visual prompt 路径只使用 SAM3 grounding 分数过滤。"""
     return float(sam_threshold)
+
+
+def _visual_prompt_candidate_limit(top_k: int) -> int:
+    """限制进入高成本 mask 上采样/CPU 后处理的候选数。"""
+    normalized_top_k = max(1, int(top_k))
+    return max(normalized_top_k, min(VISUAL_PROMPT_MAX_CANDIDATES, normalized_top_k * 2))
+
+
+def _multi_visual_prompt_candidate_limit(top_k: int, group_count: int) -> int:
+    """多类别 visual prompt 按类别收缩候选预算，避免累计候选数过大。"""
+    normalized_top_k = max(1, int(top_k))
+    normalized_group_count = max(1, int(group_count))
+    per_group_limit = _visual_prompt_candidate_limit(normalized_top_k)
+    total_budget = max(normalized_top_k, min(VISUAL_PROMPT_MAX_CANDIDATES, normalized_top_k * 6))
+    budget_per_group = max(1, total_budget // normalized_group_count)
+    return max(1, min(per_group_limit, budget_per_group))
 
 
 def _sam_grounding_score_fields(score: float) -> Dict[str, float]:
@@ -487,14 +504,14 @@ def _extract_primary_component_mask(
     if binary.max() == 0:
         return binary
 
+    h_img, w_img = binary.shape
+    x, y, w, h = [float(v) for v in candidate_bnd_points]
     num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
     if num_labels <= 1:
         return binary
 
-    x, y, w, h = candidate_bnd_points
     cx = int(round(x + w / 2.0))
     cy = int(round(y + h / 2.0))
-    h_img, w_img = binary.shape
     cx = max(0, min(cx, w_img - 1))
     cy = max(0, min(cy, h_img - 1))
     label_at_center = int(labels[cy, cx])
@@ -963,6 +980,94 @@ def _build_similar_reference_context_from_arrays(
     }
 
 
+def _prediction_box_xywh_from_arrays(
+    arrays: PredictionArrays,
+    prediction_index: int,
+    image_width: int,
+    image_height: int,
+) -> Optional[List[float]]:
+    boxes_np = arrays["boxes"]
+    if not isinstance(boxes_np, np.ndarray):
+        return None
+    if boxes_np.ndim == 1 and boxes_np.size == 4:
+        boxes_np = boxes_np[None, ...]
+    if boxes_np.ndim != 2 or boxes_np.shape[0] <= prediction_index:
+        return None
+    box_xyxy = clip_xyxy_to_image(
+        [float(v) for v in boxes_np[prediction_index]],
+        image_width,
+        image_height,
+    )
+    return bbox_to_xywh(np.asarray(box_xyxy))
+
+
+def _match_reference_prediction_indices(
+    reference_boxes_xywh: List[List[float]],
+    arrays: PredictionArrays,
+    image_width: int,
+    image_height: int,
+) -> List[int]:
+    """把输入框匹配到 SAM 返回框，避免多框返回顺序变化导致正负样本串位。"""
+    scores_np = arrays["scores"]
+    prediction_count = 0
+    if isinstance(scores_np, np.ndarray):
+        prediction_count = 1 if scores_np.ndim == 0 and scores_np.size == 1 else int(scores_np.shape[0])
+    if prediction_count <= 0:
+        return [0 for _ in reference_boxes_xywh]
+
+    prediction_boxes = [
+        _prediction_box_xywh_from_arrays(arrays, prediction_index, image_width, image_height)
+        for prediction_index in range(prediction_count)
+    ]
+    pairs: List[Tuple[float, int, int, int]] = []
+    for reference_index, reference_box in enumerate(reference_boxes_xywh):
+        for prediction_index, prediction_box in enumerate(prediction_boxes):
+            if prediction_box is None:
+                continue
+            same_order_bonus = 1 if reference_index == prediction_index else 0
+            pairs.append(
+                (
+                    bbox_iou_xywh(reference_box, prediction_box),
+                    same_order_bonus,
+                    reference_index,
+                    prediction_index,
+                )
+            )
+
+    assigned_reference_indices = set()
+    assigned_prediction_indices = set()
+    matched_indices: List[Optional[int]] = [None for _ in reference_boxes_xywh]
+    for iou, _same_order_bonus, reference_index, prediction_index in sorted(pairs, reverse=True):
+        if iou <= 0:
+            continue
+        if reference_index in assigned_reference_indices or prediction_index in assigned_prediction_indices:
+            continue
+        matched_indices[reference_index] = prediction_index
+        assigned_reference_indices.add(reference_index)
+        assigned_prediction_indices.add(prediction_index)
+
+    for reference_index, matched_index in enumerate(matched_indices):
+        if matched_index is not None:
+            continue
+        if reference_index < prediction_count and reference_index not in assigned_prediction_indices:
+            matched_indices[reference_index] = reference_index
+            assigned_prediction_indices.add(reference_index)
+            continue
+        fallback_pairs = [
+            (iou, prediction_index)
+            for iou, _same_order_bonus, pair_reference_index, prediction_index in pairs
+            if pair_reference_index == reference_index and prediction_index not in assigned_prediction_indices
+        ]
+        if fallback_pairs:
+            _iou, prediction_index = max(fallback_pairs)
+            matched_indices[reference_index] = prediction_index
+            assigned_prediction_indices.add(prediction_index)
+        else:
+            matched_indices[reference_index] = min(reference_index, prediction_count - 1)
+
+    return [int(index or 0) for index in matched_indices]
+
+
 def _visualize_multi_reference_contexts(
     reference_image: Image.Image,
     reference_contexts: List[Dict[str, Any]],
@@ -1040,6 +1145,7 @@ def _extract_sam3_semantic_arrays_from_raw_outputs(
     image_height: int,
     image_width: int,
     confidence_threshold: float,
+    max_candidates: Optional[int] = None,
 ) -> Tuple[Dict[str, np.ndarray], int, int]:
     """把 SAM3 原始 grounding 输出后处理成统一的 mask/box/score 数组。"""
     import torchvision
@@ -1080,6 +1186,11 @@ def _extract_sam3_semantic_arrays_from_raw_outputs(
     keep = torchvision.ops.nms(pred_boxes[:, :4] + class_offsets, pred_boxes[:, 4], predictor.args.iou)
     pred_boxes = pred_boxes[keep]
     pred_masks = pred_masks[keep]
+    order = torch.argsort(pred_boxes[:, 4], descending=True)
+    if max_candidates is not None:
+        order = order[: int(max_candidates)]
+    pred_boxes = pred_boxes[order]
+    pred_masks = pred_masks[order]
     kept_candidate_count = int(pred_boxes.shape[0])
 
     pred_masks = F.interpolate(
@@ -1140,6 +1251,7 @@ def _run_sam3_query_grounding_with_visual_prompt_embeddings(
     visual_prompt_mask: torch.Tensor,
     text_prompt: Optional[List[str]] = None,
     confidence_threshold: float = 0.0,
+    max_candidates: Optional[int] = None,
 ) -> Tuple[Dict[str, np.ndarray], Dict[str, int]]:
     """在查询图上使用已编码的 visual prompt token 做 SAM3 grounding。"""
     prompt_batch = text_prompt if text_prompt is not None else ["visual"]
@@ -1190,6 +1302,7 @@ def _run_sam3_query_grounding_with_visual_prompt_embeddings(
         query_image.height,
         query_image.width,
         confidence_threshold,
+        max_candidates,
     )
     return arrays, {
         "grounding_forward_ms": grounding_forward_ms,
@@ -1212,7 +1325,6 @@ def _iter_primary_mask_candidates(
     scores_np = arrays["scores"]
 
     for index in range(scores_np.shape[0]):
-        one_mask = np.asarray(masks_np[index])
         if isinstance(boxes_np, np.ndarray) and boxes_np.shape[0] > index:
             one_box_xyxy = [float(v) for v in boxes_np[index]]
         elif fallback_box_xyxy is not None:
@@ -1221,6 +1333,9 @@ def _iter_primary_mask_candidates(
             continue
 
         one_score = float(scores_np[index])
+        if one_score < score_threshold:
+            continue
+        one_mask = np.asarray(masks_np[index])
         one_box_xyxy = clip_xyxy_to_image(one_box_xyxy, image.width, image.height)
         one_box_xywh = bbox_to_xywh(np.asarray(one_box_xyxy))
         primary_u8 = _extract_primary_component_mask(one_mask, one_box_xywh)
@@ -1234,7 +1349,7 @@ def _iter_primary_mask_candidates(
 
         primary_area = int(np.count_nonzero(primary_u8))
         area_ratio = primary_area / max(1, image.width * image.height)
-        if area_ratio <= min_area_ratio or one_score < score_threshold:
+        if area_ratio <= min_area_ratio:
             continue
 
         yield {
@@ -1266,6 +1381,7 @@ def _run_similar_query_with_reference_context(
     ref_best_xywh = reference_ctx["ref_best_xywh"]
     text_prompt, original_prompt, translated_prompt, was_translated = prepare_single_text_prompt(prompt_text)
     native_score_threshold = _native_visual_prompt_score_threshold(sam_threshold)
+    max_visual_prompt_candidates = _visual_prompt_candidate_limit(top_k)
     reference_prompt_encode_start = time.perf_counter()
     reference_features = set_ultralytics_image_features(reference_image)
     _, reference_img_feats, reference_img_pos_embeds, reference_feat_sizes = _prepare_sam3_backbone_features(
@@ -1296,7 +1412,8 @@ def _run_similar_query_with_reference_context(
         visual_prompt_embed=reference_visual_prompt_embed,
         visual_prompt_mask=reference_visual_prompt_mask,
         text_prompt=text_prompt,
-        confidence_threshold=0.0,
+        confidence_threshold=native_score_threshold,
+        max_candidates=max_visual_prompt_candidates,
     )
     prompt_forward_ms = _elapsed_ms(prompt_start)
 
@@ -1316,15 +1433,12 @@ def _run_similar_query_with_reference_context(
             continue
 
         primary_u8 = candidate["primary_mask"]
-        polygons = mask_to_polygons(primary_u8.astype(np.float32), epsilon=polygon_simplify_epsilon)
-        polygon_points = polygons[0]["points"] if polygons else bbox_xywh_to_polygon_points(one_box_xywh)
         matched_labels.append(
             {
                 "category": original_prompt or "similar_object",
                 "translated_category": translated_prompt if was_translated else None,
                 **_sam_grounding_score_fields(one_score),
                 "bnd_points": one_box_xywh,
-                "polygon_points": polygon_points,
                 "mask_area": candidate["mask_area"],
             }
         )
@@ -1338,6 +1452,9 @@ def _run_similar_query_with_reference_context(
     matched_masks = [matched_masks[i] for i in order]
     matched_boxes_xyxy = [matched_boxes_xyxy[i] for i in order]
     matched_scores = [matched_scores[i] for i in order]
+    for label, mask in zip(matched_labels, matched_masks):
+        polygons = mask_to_polygons(mask, epsilon=polygon_simplify_epsilon)
+        label["polygon_points"] = polygons[0]["points"] if polygons else bbox_xywh_to_polygon_points(label["bnd_points"])
 
     result_image = _visualize_single_detection_group(
         query_image,
@@ -1378,6 +1495,7 @@ def _run_similar_query_with_reference_context(
             "candidate_loop_ms": candidate_loop_ms,
             "raw_visual_prompt_candidates": native_profile["raw_candidate_count"],
             "post_nms_candidates": native_profile["kept_candidate_count"],
+            "max_visual_prompt_candidates": max_visual_prompt_candidates,
             "native_cross_image_visual_prompt": True,
             "native_score_threshold": round(native_score_threshold, 6),
             "similarity_threshold_applied": False,
@@ -1559,14 +1677,11 @@ def _run_same_image_prompt_query(
         if any(bbox_iou_xywh(existing["bnd_points"], one_box_xywh) > 0.75 for existing in matched_labels):
             continue
 
-        polygons = mask_to_polygons(primary_u8.astype(np.float32), epsilon=polygon_simplify_epsilon)
-        polygon_points = polygons[0]["points"] if polygons else bbox_xywh_to_polygon_points(one_box_xywh)
         matched_labels.append(
             {
                 "category": "similar_object",
                 **_sam_grounding_score_fields(sam_score),
                 "bnd_points": one_box_xywh,
-                "polygon_points": polygon_points,
                 "mask_area": candidate["mask_area"],
                 "is_reference_overlap": bbox_iou_xywh(reference_bnd_points, one_box_xywh) > 0.5,
             }
@@ -1580,6 +1695,9 @@ def _run_same_image_prompt_query(
     matched_masks = [matched_masks[i] for i in order]
     matched_boxes_xyxy = [matched_boxes_xyxy[i] for i in order]
     matched_scores = [matched_scores[i] for i in order]
+    for label, mask in zip(matched_labels, matched_masks):
+        polygons = mask_to_polygons(mask, epsilon=polygon_simplify_epsilon)
+        label["polygon_points"] = polygons[0]["points"] if polygons else bbox_xywh_to_polygon_points(label["bnd_points"])
 
     result_image = _visualize_single_detection_group(
         image,
@@ -1809,6 +1927,12 @@ def _prepare_multi_reference_contexts_for_one_image(
         reset_cached_image=False,
     )
     arrays = extract_ultralytics_arrays(result)
+    matched_result_indices = _match_reference_prediction_indices(
+        clipped_boxes,
+        arrays,
+        reference_image.width,
+        reference_image.height,
+    )
 
     reference_contexts: List[Dict[str, Any]] = []
     for index, sample in enumerate(samples):
@@ -1816,7 +1940,7 @@ def _prepare_multi_reference_contexts_for_one_image(
             reference_image=reference_image,
             reference_bnd_points=clipped_boxes[index],
             arrays=arrays,
-            result_index=index,
+            result_index=matched_result_indices[index],
             reference_features=reference_features,
             build_reference_result_image=False,
         )
@@ -1981,6 +2105,7 @@ def _collect_negative_visual_prompt_boxes(
     query_image: Image.Image,
     query_features: Dict[str, Any],
     native_score_threshold: float,
+    max_visual_prompt_candidates: int,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
     """用负样本 visual prompt 找出需要从正样本结果中抑制的区域。"""
     negative_source_groups = group.get("negative_source_groups") or []
@@ -2017,7 +2142,59 @@ def _collect_negative_visual_prompt_boxes(
         visual_prompt_embed=merged_prompt_embed,
         visual_prompt_mask=merged_prompt_mask,
         text_prompt=group.get("text_prompt"),
-        confidence_threshold=0.0,
+        confidence_threshold=native_score_threshold,
+        max_candidates=max_visual_prompt_candidates,
+    )
+    profile["negative_grounding_forward_ms"] += int(negative_profile["grounding_forward_ms"])
+    profile["negative_raw_candidates"] += int(negative_profile["raw_candidate_count"])
+    profile["negative_post_nms_candidates"] += int(negative_profile["kept_candidate_count"])
+
+    negative_records: List[Dict[str, Any]] = []
+    for candidate in _iter_primary_mask_candidates(
+        arrays,
+        query_image,
+        score_threshold=native_score_threshold,
+    ):
+        negative_records.append(
+            {
+                "bnd_points": candidate["bnd_points"],
+                "box_xyxy": candidate["box_xyxy"],
+                "score": max(0.0, min(1.0, candidate["score"])),
+            }
+        )
+
+    profile["negative_filter_candidates"] = len(negative_records)
+    return negative_records, profile
+
+
+def _collect_negative_visual_prompt_boxes_from_group_state(
+    group: Dict[str, Any],
+    query_image: Image.Image,
+    query_features: Dict[str, Any],
+    native_score_threshold: float,
+    max_visual_prompt_candidates: int,
+) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
+    """Use pre-encoded negative visual prompts for one query image."""
+    profile = {
+        "negative_reference_prompt_encode_ms": 0,
+        "negative_grounding_forward_ms": 0,
+        "negative_raw_candidates": 0,
+        "negative_post_nms_candidates": 0,
+        "negative_filter_candidates": 0,
+    }
+    visual_prompt_embed = group.get("negative_visual_prompt_embed")
+    visual_prompt_mask = group.get("negative_visual_prompt_mask")
+    if visual_prompt_embed is None or visual_prompt_mask is None:
+        return [], profile
+
+    arrays, negative_profile = _run_sam3_query_grounding_with_visual_prompt_embeddings(
+        query_image=query_image,
+        query_features=query_features,
+        visual_prompt_embed=visual_prompt_embed,
+        visual_prompt_mask=visual_prompt_mask,
+        text_prompt=group.get("text_prompt"),
+        confidence_threshold=native_score_threshold,
+        max_candidates=max_visual_prompt_candidates,
     )
     profile["negative_grounding_forward_ms"] += int(negative_profile["grounding_forward_ms"])
     profile["negative_raw_candidates"] += int(negative_profile["raw_candidate_count"])
@@ -2053,6 +2230,93 @@ def _is_suppressed_by_negative_sample(
     )
 
 
+def prepare_multi_visual_prompt_state(samples: List[Dict[str, Any]], top_k: int) -> Dict[str, Any]:
+    """Prepare reusable visual prompt embeddings for URL/task based sample annotation."""
+    start_time = time.perf_counter()
+    with _model_inference_context():
+        sample_contexts = _prepare_multi_similar_reference_contexts(samples, top_k)
+        grouped_prompts = _group_multi_sample_contexts_for_native_prompt(sample_contexts)
+        prepared_groups: List[Dict[str, Any]] = []
+        total_reference_prompt_encode_ms = 0
+        total_negative_reference_prompt_encode_ms = 0
+
+        for group in grouped_prompts:
+            visual_prompt_embeds: List[torch.Tensor] = []
+            visual_prompt_masks: List[torch.Tensor] = []
+            group_prompt_encode_ms = 0
+            for source_group in group["source_groups"]:
+                prompt_embed, prompt_mask, prompt_profile = _encode_reference_visual_prompt_from_boxes(
+                    source_group["reference_image"],
+                    source_group["reference_boxes"],
+                    source_group.get("reference_features"),
+                )
+                group_prompt_encode_ms += int(prompt_profile["reference_prompt_encode_ms"])
+                visual_prompt_embeds.append(prompt_embed)
+                visual_prompt_masks.append(prompt_mask)
+            if not visual_prompt_embeds:
+                continue
+
+            prepared_group = dict(group)
+            prepared_group["visual_prompt_embed"] = torch.cat(visual_prompt_embeds, dim=0)
+            prepared_group["visual_prompt_mask"] = torch.cat(visual_prompt_masks, dim=1)
+            prepared_group["reference_prompt_encode_ms"] = group_prompt_encode_ms
+            total_reference_prompt_encode_ms += group_prompt_encode_ms
+
+            negative_prompt_embeds: List[torch.Tensor] = []
+            negative_prompt_masks: List[torch.Tensor] = []
+            negative_prompt_encode_ms = 0
+            for source_group in group.get("negative_source_groups") or []:
+                prompt_embed, prompt_mask, prompt_profile = _encode_reference_visual_prompt_from_boxes(
+                    source_group["reference_image"],
+                    source_group["reference_boxes"],
+                    source_group.get("reference_features"),
+                )
+                negative_prompt_encode_ms += int(prompt_profile["reference_prompt_encode_ms"])
+                negative_prompt_embeds.append(prompt_embed)
+                negative_prompt_masks.append(prompt_mask)
+            if negative_prompt_embeds:
+                prepared_group["negative_visual_prompt_embed"] = torch.cat(negative_prompt_embeds, dim=0)
+                prepared_group["negative_visual_prompt_mask"] = torch.cat(negative_prompt_masks, dim=1)
+            prepared_group["negative_reference_prompt_encode_ms"] = negative_prompt_encode_ms
+            total_negative_reference_prompt_encode_ms += negative_prompt_encode_ms
+            prepared_groups.append(prepared_group)
+
+    positive_sample_count = sum(1 for sample_ctx in sample_contexts if sample_ctx.get("sample_type") != "negative")
+    negative_sample_count = sum(1 for sample_ctx in sample_contexts if sample_ctx.get("sample_type") == "negative")
+    reference_source_keys = {_reference_source_group_key(sample_ctx) for sample_ctx in sample_contexts}
+    for sample_ctx in sample_contexts:
+        sample_ctx.pop("reference_image", None)
+        sample_ctx.pop("reference_mask", None)
+        sample_ctx.pop("reference_features", None)
+    for group in prepared_groups:
+        for source_group in group.get("source_groups") or []:
+            source_group.pop("reference_image", None)
+            source_group.pop("reference_features", None)
+        for source_group in group.get("negative_source_groups") or []:
+            source_group.pop("reference_image", None)
+            source_group.pop("reference_features", None)
+        for sample_ctx in group.get("sample_contexts") or []:
+            sample_ctx.pop("reference_image", None)
+            sample_ctx.pop("reference_mask", None)
+            sample_ctx.pop("reference_features", None)
+        for sample_ctx in group.get("negative_sample_contexts") or []:
+            sample_ctx.pop("reference_image", None)
+            sample_ctx.pop("reference_mask", None)
+            sample_ctx.pop("reference_features", None)
+    return {
+        "sample_contexts": sample_contexts,
+        "prepared_groups": prepared_groups,
+        "num_samples": len(sample_contexts),
+        "num_positive_samples": positive_sample_count,
+        "num_negative_samples": negative_sample_count,
+        "num_groups": len(prepared_groups),
+        "reference_source_count": len(reference_source_keys),
+        "reference_prompt_encode_ms": total_reference_prompt_encode_ms,
+        "negative_reference_prompt_encode_ms": total_negative_reference_prompt_encode_ms,
+        "prepare_time_ms": _elapsed_ms(start_time),
+    }
+
+
 def _run_multi_native_visual_prompt_query(
     sample_contexts: List[Dict[str, Any]],
     query_image: Image.Image,
@@ -2068,6 +2332,7 @@ def _run_multi_native_visual_prompt_query(
     query_start_time = time.perf_counter()
     grouped_prompts = _group_multi_sample_contexts_for_native_prompt(sample_contexts)
     native_score_threshold = _native_visual_prompt_score_threshold(sam_threshold)
+    max_visual_prompt_candidates = _multi_visual_prompt_candidate_limit(top_k, len(grouped_prompts))
 
     set_query_start = time.perf_counter()
     query_features = set_ultralytics_image_features(query_image)
@@ -2093,6 +2358,7 @@ def _run_multi_native_visual_prompt_query(
             query_image,
             query_features,
             native_score_threshold,
+            max_visual_prompt_candidates,
         )
         total_negative_reference_prompt_encode_ms += int(negative_profile["negative_reference_prompt_encode_ms"])
         total_negative_grounding_forward_ms += int(negative_profile["negative_grounding_forward_ms"])
@@ -2124,7 +2390,8 @@ def _run_multi_native_visual_prompt_query(
             visual_prompt_embed=merged_prompt_embed,
             visual_prompt_mask=merged_prompt_mask,
             text_prompt=group["text_prompt"],
-            confidence_threshold=0.0,
+            confidence_threshold=native_score_threshold,
+            max_candidates=max_visual_prompt_candidates,
         )
         group_candidate_loop_start = time.perf_counter()
 
@@ -2146,8 +2413,6 @@ def _run_multi_native_visual_prompt_query(
                 continue
 
             primary_u8 = candidate["primary_mask"]
-            polygons = mask_to_polygons(primary_u8.astype(np.float32), epsilon=polygon_simplify_epsilon)
-            polygon_points = polygons[0]["points"] if polygons else bbox_xywh_to_polygon_points(one_box_xywh)
             label = {
                 "category": group["category"],
                 "sample_id": group["sample_id_display"],
@@ -2158,7 +2423,6 @@ def _run_multi_native_visual_prompt_query(
                 "translated_prompt": group.get("translated_prompt"),
                 **_sam_grounding_score_fields(one_score),
                 "bnd_points": one_box_xywh,
-                "polygon_points": polygon_points,
                 "mask_area": candidate["mask_area"],
             }
             candidate_records.append(
@@ -2190,10 +2454,15 @@ def _run_multi_native_visual_prompt_query(
                 "negative_filter_candidates": int(negative_profile["negative_filter_candidates"]),
                 "suppressed_by_negative_samples": suppressed_by_negative_count,
                 "candidate_loop_ms": group_candidate_loop_ms,
+                "max_visual_prompt_candidates": max_visual_prompt_candidates,
             }
         )
 
     kept_records = _nms_multi_similar_records(candidate_records, nms_iou, top_k)
+    for record in kept_records:
+        label = record["label"]
+        polygons = mask_to_polygons(record["mask"], epsilon=polygon_simplify_epsilon)
+        label["polygon_points"] = polygons[0]["points"] if polygons else bbox_xywh_to_polygon_points(label["bnd_points"])
     matched_labels = [record["label"] for record in kept_records]
 
     result_image = None
@@ -2301,6 +2570,217 @@ def _run_multi_native_visual_prompt_query(
             "negative_grounding_forward_ms": total_negative_grounding_forward_ms,
             "raw_visual_prompt_candidates": raw_candidate_count,
             "post_nms_candidates": post_nms_candidate_count,
+            "max_visual_prompt_candidates": max_visual_prompt_candidates,
+            "negative_raw_visual_prompt_candidates": total_negative_raw_candidate_count,
+            "negative_post_nms_candidates": total_negative_post_nms_candidate_count,
+            "negative_filter_candidates": total_negative_filter_candidate_count,
+            "suppressed_by_negative_samples": total_suppressed_by_negative_count,
+            "negative_filter_iou": round(MULTI_NEGATIVE_FILTER_IOU, 6),
+            "final_nms_iou": float(nms_iou),
+            "native_multi_visual_prompt": True,
+            "native_score_threshold": round(native_score_threshold, 6),
+            "similarity_threshold_applied": False,
+            "score_type": "sam_grounding_score",
+            "groups": group_profiles,
+        },
+    }
+
+
+def run_multi_visual_prompt_query_with_state(
+    prompt_state: Dict[str, Any],
+    query_image: Image.Image,
+    top_k: int,
+    similarity_threshold: float,
+    sam_threshold: float,
+    nms_iou: float,
+    polygon_simplify_epsilon: float,
+    pic_id: str,
+    *,
+    return_result_image: bool = False,
+) -> Dict[str, Any]:
+    """Run one query image with pre-encoded multi visual prompt state."""
+    query_image = query_image.convert("RGB")
+    query_start_time = time.perf_counter()
+    grouped_prompts = prompt_state.get("prepared_groups") or []
+    if not grouped_prompts:
+        raise ValueError("No prepared visual prompt groups available")
+
+    native_score_threshold = _native_visual_prompt_score_threshold(sam_threshold)
+    max_visual_prompt_candidates = _multi_visual_prompt_candidate_limit(top_k, len(grouped_prompts))
+
+    candidate_records: List[Dict[str, Any]] = []
+    raw_candidate_count = 0
+    post_nms_candidate_count = 0
+    total_grounding_forward_ms = 0
+    total_candidate_loop_ms = 0
+    total_negative_grounding_forward_ms = 0
+    total_negative_raw_candidate_count = 0
+    total_negative_post_nms_candidate_count = 0
+    total_negative_filter_candidate_count = 0
+    total_suppressed_by_negative_count = 0
+    group_profiles: List[Dict[str, Any]] = []
+
+    with _model_inference_context():
+        set_query_start = time.perf_counter()
+        query_features = set_ultralytics_image_features(query_image)
+        set_query_ms = _elapsed_ms(set_query_start)
+
+        for group in grouped_prompts:
+            negative_records, negative_profile = _collect_negative_visual_prompt_boxes_from_group_state(
+                group,
+                query_image,
+                query_features,
+                native_score_threshold,
+                max_visual_prompt_candidates,
+            )
+            total_negative_grounding_forward_ms += int(negative_profile["negative_grounding_forward_ms"])
+            total_negative_raw_candidate_count += int(negative_profile["negative_raw_candidates"])
+            total_negative_post_nms_candidate_count += int(negative_profile["negative_post_nms_candidates"])
+            total_negative_filter_candidate_count += int(negative_profile["negative_filter_candidates"])
+            suppressed_by_negative_count = 0
+
+            arrays, group_profile = _run_sam3_query_grounding_with_visual_prompt_embeddings(
+                query_image=query_image,
+                query_features=query_features,
+                visual_prompt_embed=group["visual_prompt_embed"],
+                visual_prompt_mask=group["visual_prompt_mask"],
+                text_prompt=group["text_prompt"],
+                confidence_threshold=native_score_threshold,
+                max_candidates=max_visual_prompt_candidates,
+            )
+            group_candidate_loop_start = time.perf_counter()
+            raw_candidate_count += int(group_profile["raw_candidate_count"])
+            post_nms_candidate_count += int(group_profile["kept_candidate_count"])
+            total_grounding_forward_ms += int(group_profile["grounding_forward_ms"])
+
+            for candidate in _iter_primary_mask_candidates(
+                arrays,
+                query_image,
+                score_threshold=native_score_threshold,
+            ):
+                one_box_xywh = candidate["bnd_points"]
+                one_score = candidate["score"]
+                if _is_suppressed_by_negative_sample(one_box_xywh, negative_records, MULTI_NEGATIVE_FILTER_IOU):
+                    suppressed_by_negative_count += 1
+                    total_suppressed_by_negative_count += 1
+                    continue
+
+                primary_u8 = candidate["primary_mask"]
+                label = {
+                    "category": group["category"],
+                    "sample_id": group["sample_id_display"],
+                    "sample_ids": group["sample_ids"],
+                    "source_image_id": group["source_image_id_display"],
+                    "source_image_ids": group["source_image_ids"],
+                    "prompt": group.get("prompt"),
+                    "translated_prompt": group.get("translated_prompt"),
+                    **_sam_grounding_score_fields(one_score),
+                    "bnd_points": one_box_xywh,
+                    "mask_area": candidate["mask_area"],
+                }
+                candidate_records.append(
+                    {
+                        "label": label,
+                        "mask": primary_u8.astype(np.float32),
+                        "box_xyxy": candidate["box_xyxy"],
+                        "score": max(0.0, min(1.0, one_score)),
+                    }
+                )
+
+            group_candidate_loop_ms = _elapsed_ms(group_candidate_loop_start)
+            total_candidate_loop_ms += group_candidate_loop_ms
+            group_profiles.append(
+                {
+                    "category": group["category"],
+                    "num_samples": len(group["sample_contexts"]),
+                    "num_negative_samples": len(group.get("negative_sample_contexts") or []),
+                    "num_source_images": len(group["source_groups"]),
+                    "num_negative_source_images": len(group.get("negative_source_groups") or []),
+                    "reference_prompt_encode_ms": int(group.get("reference_prompt_encode_ms", 0)),
+                    "grounding_forward_ms": int(group_profile["grounding_forward_ms"]),
+                    "raw_candidates": int(group_profile["raw_candidate_count"]),
+                    "post_nms_candidates": int(group_profile["kept_candidate_count"]),
+                    "negative_reference_prompt_encode_ms": int(group.get("negative_reference_prompt_encode_ms", 0)),
+                    "negative_grounding_forward_ms": int(negative_profile["negative_grounding_forward_ms"]),
+                    "negative_raw_candidates": int(negative_profile["negative_raw_candidates"]),
+                    "negative_post_nms_candidates": int(negative_profile["negative_post_nms_candidates"]),
+                    "negative_filter_candidates": int(negative_profile["negative_filter_candidates"]),
+                    "suppressed_by_negative_samples": suppressed_by_negative_count,
+                    "candidate_loop_ms": group_candidate_loop_ms,
+                    "max_visual_prompt_candidates": max_visual_prompt_candidates,
+                }
+            )
+
+    kept_records = _nms_multi_similar_records(candidate_records, nms_iou, top_k)
+    for record in kept_records:
+        label = record["label"]
+        polygons = mask_to_polygons(record["mask"], epsilon=polygon_simplify_epsilon)
+        label["polygon_points"] = polygons[0]["points"] if polygons else bbox_xywh_to_polygon_points(label["bnd_points"])
+    matched_labels = [record["label"] for record in kept_records]
+
+    result_image = None
+    if return_result_image and kept_records:
+        category_order: Dict[str, int] = {}
+        for record in kept_records:
+            category = record["label"]["category"]
+            if category not in category_order:
+                category_order[category] = len(category_order)
+        detections_for_viz: List[Dict[str, Any]] = []
+        for category, color_index in category_order.items():
+            category_records = [record for record in kept_records if record["label"]["category"] == category]
+            detections_for_viz.append(
+                {
+                    "class_name": category,
+                    "original_class_name": category,
+                    "masks": np.asarray([record["mask"] for record in category_records]),
+                    "boxes": np.asarray([record["box_xyxy"] for record in category_records]),
+                    "scores": np.asarray([record["score"] for record in category_records]),
+                    "color": build_class_color(color_index),
+                }
+            )
+        result_image = visualize_results(query_image, detections_for_viz)
+
+    sample_contexts = prompt_state.get("sample_contexts") or []
+    category_counts: Dict[str, int] = {}
+    for label in matched_labels:
+        category_counts[label["category"]] = category_counts.get(label["category"], 0) + 1
+
+    processing_time_ms = _elapsed_ms(query_start_time)
+    return {
+        "model": MODEL_LABEL,
+        "pic_id": pic_id,
+        "success": True,
+        "similar_mode": "multi_visual_prompt_url",
+        "top_k": int(top_k),
+        "top_k_scope": "per_category",
+        "similarity_threshold": float(similarity_threshold),
+        "sam_threshold": float(sam_threshold),
+        "nms_iou": float(nms_iou),
+        "num_samples": int(prompt_state.get("num_samples", len(sample_contexts))),
+        "num_positive_samples": int(prompt_state.get("num_positive_samples", 0)),
+        "num_negative_samples": int(prompt_state.get("num_negative_samples", 0)),
+        "num_groups": len(grouped_prompts),
+        "num_candidates": raw_candidate_count,
+        "num_matches": len(matched_labels),
+        "category_counts": category_counts,
+        "pic_labels": matched_labels,
+        "result_image": result_image,
+        "created": int(time.time()),
+        "processing_time_ms": processing_time_ms,
+        "profile": {
+            "set_query_ms": set_query_ms,
+            "sample_cache_hit": bool(prompt_state.get("cache_hit", False)),
+            "reference_feature_reuse_enabled": True,
+            "reference_feature_extract_count": int(prompt_state.get("reference_source_count", 0)),
+            "reference_sample_context_count": int(prompt_state.get("num_samples", len(sample_contexts))),
+            "reference_prompt_encode_ms": int(prompt_state.get("reference_prompt_encode_ms", 0)),
+            "negative_reference_prompt_encode_ms": int(prompt_state.get("negative_reference_prompt_encode_ms", 0)),
+            "grounding_forward_ms": total_grounding_forward_ms,
+            "candidate_loop_ms": total_candidate_loop_ms,
+            "negative_grounding_forward_ms": total_negative_grounding_forward_ms,
+            "raw_visual_prompt_candidates": raw_candidate_count,
+            "post_nms_candidates": post_nms_candidate_count,
+            "max_visual_prompt_candidates": max_visual_prompt_candidates,
             "negative_raw_visual_prompt_candidates": total_negative_raw_candidate_count,
             "negative_post_nms_candidates": total_negative_post_nms_candidate_count,
             "negative_filter_candidates": total_negative_filter_candidate_count,

@@ -5,6 +5,7 @@ import io
 import json
 import time
 import traceback
+from functools import partial
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse
@@ -44,8 +45,11 @@ from .schemas import (
     CreateApiKeyRequest,
     MultiSimilarObjectRequest,
     SegmentationRequest,
+    SimilarObjectByUrlRequest,
     SimilarObjectRequest,
+    SimilarObjectTaskCreateRequest,
 )
+from .url_tasks import TASK_REGISTRY, run_by_url_request
 
 
 def register_routes(app: FastAPI) -> None:
@@ -375,6 +379,85 @@ def register_routes(app: FastAPI) -> None:
             raise HTTPException(status_code=500, detail=f"Multi similar object segmentation failed: {exc}") from exc
 
         return result
+
+
+    @app.post("/v1/similar-object-segmentations/by-url")
+    async def create_similar_object_segmentation_by_url(
+        payload: SimilarObjectByUrlRequest,
+        _: Dict[str, Any] = Depends(require_api_key),
+    ) -> Dict[str, Any]:
+        try:
+            async with INFERENCE_SEMAPHORE:
+                result = await run_inference_in_thread(
+                    partial(
+                        run_by_url_request,
+                        download_url=payload.download_url,
+                        sample_url=payload.sample_url,
+                        query_image_url=payload.query_image_url,
+                        pic_id=payload.pic_id,
+                        top_k=payload.top_k,
+                        similarity_threshold=payload.similarity_threshold,
+                        sam_threshold=payload.sam_threshold,
+                        nms_iou=payload.nms_iou,
+                        polygon_simplify_epsilon=payload.polygon_simplify_epsilon,
+                        return_result_image=payload.return_result_image,
+                    ),
+                )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            traceback.print_exc()
+            raise HTTPException(status_code=500, detail=f"Similar object URL segmentation failed: {exc}") from exc
+
+        return result
+
+
+    @app.post("/v1/similar-object-segmentations/tasks")
+    async def create_similar_object_segmentation_task(
+        payload: SimilarObjectTaskCreateRequest,
+        _: Dict[str, Any] = Depends(require_api_key),
+    ) -> Dict[str, Any]:
+        try:
+            task = TASK_REGISTRY.create(payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return task.snapshot()
+
+
+    @app.get("/v1/similar-object-segmentations/tasks/{task_id}")
+    async def get_similar_object_segmentation_task(
+        task_id: str,
+        _: Dict[str, Any] = Depends(require_api_key),
+    ) -> Dict[str, Any]:
+        task = TASK_REGISTRY.get(task_id)
+        if not task:
+            raise HTTPException(status_code=404, detail=f"Task not found: {task_id}")
+        return task.snapshot()
+
+
+    @app.get("/v1/similar-object-segmentations/tasks/{task_id}/results")
+    async def get_similar_object_segmentation_task_results(
+        task_id: str,
+        offset: int = 0,
+        limit: int = 50,
+        wait_timeout: float = 0.0,
+        _: Dict[str, Any] = Depends(require_api_key),
+    ) -> Dict[str, Any]:
+        task = TASK_REGISTRY.get(task_id)
+        if not task:
+            raise HTTPException(status_code=404, detail=f"Task not found: {task_id}")
+        return task.wait_result_page(offset, limit, wait_timeout)
+
+
+    @app.delete("/v1/similar-object-segmentations/tasks/{task_id}")
+    async def cancel_similar_object_segmentation_task(
+        task_id: str,
+        _: Dict[str, Any] = Depends(require_api_key),
+    ) -> Dict[str, Any]:
+        cancelled = TASK_REGISTRY.cancel(task_id)
+        if not cancelled:
+            raise HTTPException(status_code=404, detail=f"Task not found: {task_id}")
+        return {"success": True, "task_id": task_id, "status": "cancelled", "message": "cancel requested"}
 
 
     @app.post("/detect")

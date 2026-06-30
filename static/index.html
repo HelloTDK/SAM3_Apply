@@ -491,6 +491,13 @@
             gap: 12px;
         }
 
+        .reference-results-list {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 12px;
+            margin-top: 12px;
+        }
+
         .query-result-card {
             background: white;
             border-radius: 10px;
@@ -509,6 +516,44 @@
             color: #667085;
             font-size: 0.9em;
             line-height: 1.5;
+            margin-bottom: 8px;
+        }
+
+        .timing-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 10px 0 12px;
+            font-size: 0.88em;
+            color: #344054;
+        }
+
+        .timing-table th,
+        .timing-table td {
+            border-bottom: 1px solid #eaecf0;
+            padding: 7px 6px;
+            text-align: left;
+            vertical-align: top;
+        }
+
+        .timing-table th {
+            color: #667085;
+            font-weight: 600;
+            background: #f8fafc;
+        }
+
+        .timing-table td:last-child,
+        .timing-table th:last-child {
+            text-align: right;
+        }
+
+        .timing-details {
+            margin: 10px 0 12px;
+        }
+
+        .timing-details summary {
+            cursor: pointer;
+            color: #344054;
+            font-weight: 600;
             margin-bottom: 8px;
         }
 
@@ -881,6 +926,7 @@
                 <div>
                     <div class="hint" id="referenceResultTitle">示例目标分割结果（SAM+box）</div>
                     <img id="referenceResultImage" class="preview-image" alt="样图识别结果" style="display:none;">
+                    <div id="referenceResultsList" class="reference-results-list"></div>
                 </div>
                 <div>
                     <div class="hint" id="resultImageTitle">图2相似目标比对结果</div>
@@ -942,6 +988,7 @@
         const resultInfo = document.getElementById('resultInfo');
         const referenceResultTitle = document.getElementById('referenceResultTitle');
         const referenceResultImage = document.getElementById('referenceResultImage');
+        const referenceResultsList = document.getElementById('referenceResultsList');
         const resultImageTitle = document.getElementById('resultImageTitle');
         const resultImage = document.getElementById('resultImage');
         const queryResultsList = document.getElementById('queryResultsList');
@@ -2112,6 +2159,140 @@
             )).join('');
         }
 
+        function isFiniteNumber(value) {
+            return typeof value === 'number' && Number.isFinite(value);
+        }
+
+        function formatMs(value) {
+            if (!isFiniteNumber(value)) return '-';
+            if (value >= 1000) return `${(value / 1000).toFixed(2)}s`;
+            return `${Math.round(value)}ms`;
+        }
+
+        function formatCount(value) {
+            return isFiniteNumber(value) ? String(Math.round(value)) : '-';
+        }
+
+        function sumNumeric(items, getter) {
+            return items.reduce((sum, item) => {
+                const value = getter(item);
+                return sum + (isFiniteNumber(value) ? value : 0);
+            }, 0);
+        }
+
+        function collectReferenceResultImages(data, queryResults) {
+            const dataImages = Array.isArray(data.sample_result_images) ? data.sample_result_images : [];
+            if (dataImages.length) return dataImages;
+            const queryImages = Array.isArray(queryResults[0]?.sample_result_images) ? queryResults[0].sample_result_images : [];
+            if (queryImages.length) return queryImages;
+            const singleImage = data.reference_result_image || queryResults[0]?.reference_result_image;
+            return singleImage ? [{ source_image_id: 'sample', reference_result_image: singleImage }] : [];
+        }
+
+        function renderReferenceResultImages(referenceImages) {
+            const validImages = referenceImages.filter((item) => item && item.reference_result_image);
+            referenceResultsList.innerHTML = '';
+            if (!validImages.length) {
+                referenceResultImage.style.display = 'none';
+                referenceResultImage.removeAttribute('src');
+                return;
+            }
+            if (validImages.length === 1) {
+                const item = validImages[0];
+                referenceResultImage.style.display = 'block';
+                referenceResultImage.src = `/results/${item.reference_result_image}?t=${Date.now()}`;
+                referenceResultImage.alt = `样图识别结果 ${item.source_image_id || ''}`.trim();
+                return;
+            }
+            referenceResultImage.style.display = 'none';
+            referenceResultImage.removeAttribute('src');
+            referenceResultsList.innerHTML = validImages.map((item, index) => {
+                const title = item.source_image_id || `样例 #${index + 1}`;
+                const counts = `正 ${Number(item.num_positive_samples || 0)} / 负 ${Number(item.num_negative_samples || 0)}`;
+                return `
+                    <div class="query-result-card">
+                        <div class="query-result-title">${escapeHtml(title)}</div>
+                        <div class="query-result-meta">${escapeHtml(counts)}</div>
+                        <img src="/results/${item.reference_result_image}?t=${Date.now()}" class="preview-image" alt="样图识别结果 ${escapeHtml(title)}">
+                    </div>
+                `;
+            }).join('');
+        }
+
+        function metricCard(label, value) {
+            return `
+                <div class="info-card">
+                    <div class="info-label">${escapeHtml(label)}</div>
+                    <div class="info-value">${escapeHtml(String(value))}</div>
+                </div>
+            `;
+        }
+
+        function renderTimingRows(profile) {
+            if (!profile) return '';
+            const rows = [
+                ['Query 特征提取', formatMs(profile.set_query_ms)],
+                ['样例 Prompt 编码', formatMs(profile.reference_prompt_encode_ms)],
+                ['Grounding 前向', formatMs(profile.grounding_forward_ms)],
+                ['候选后处理', formatMs(profile.candidate_loop_ms)],
+                ['负样本 Prompt 编码', formatMs(profile.negative_reference_prompt_encode_ms)],
+                ['负样本 Grounding', formatMs(profile.negative_grounding_forward_ms)],
+                ['原始候选', `${formatCount(profile.raw_visual_prompt_candidates)} 个`],
+                ['NMS 后候选', `${formatCount(profile.post_nms_candidates)} 个`],
+                ['候选处理上限', `${formatCount(profile.max_visual_prompt_candidates)} 个`],
+                ['负样本原始候选', `${formatCount(profile.negative_raw_visual_prompt_candidates)} 个`],
+                ['负样本 NMS 后候选', `${formatCount(profile.negative_post_nms_candidates)} 个`],
+                ['负样本过滤候选', `${formatCount(profile.negative_filter_candidates)} 个`],
+                ['被负样本抑制', `${formatCount(profile.suppressed_by_negative_samples)} 个`],
+            ].filter(([, value]) => value !== '-' && value !== '- 个');
+            if (!rows.length) return '';
+            return `
+                <table class="timing-table">
+                    <tbody>
+                        ${rows.map(([label, value]) => `
+                            <tr>
+                                <td>${escapeHtml(label)}</td>
+                                <td>${escapeHtml(value)}</td>
+                            </tr>
+                        `).join('')}
+                    </tbody>
+                </table>
+            `;
+        }
+
+        function renderGroupTimingRows(groups) {
+            if (!Array.isArray(groups) || !groups.length) return '';
+            return `
+                <details class="timing-details">
+                    <summary>类别组耗时明细</summary>
+                    <table class="timing-table">
+                        <thead>
+                            <tr>
+                                <th>类别</th>
+                                <th>样例源</th>
+                                <th>Prompt</th>
+                                <th>Grounding</th>
+                                <th>后处理</th>
+                                <th>候选</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${groups.map((group) => `
+                                <tr>
+                                    <td>${escapeHtml(group.category || '-')}</td>
+                                    <td>${formatCount(group.num_source_images)} / 负 ${formatCount(group.num_negative_source_images)}</td>
+                                    <td>${formatMs(group.reference_prompt_encode_ms)} / 负 ${formatMs(group.negative_reference_prompt_encode_ms)}</td>
+                                    <td>${formatMs(group.grounding_forward_ms)} / 负 ${formatMs(group.negative_grounding_forward_ms)}</td>
+                                    <td>${formatMs(group.candidate_loop_ms)}</td>
+                                    <td>${formatCount(group.raw_candidates)} raw / ${formatCount(group.post_nms_candidates)} nms</td>
+                                </tr>
+                            `).join('')}
+                        </tbody>
+                    </table>
+                </details>
+            `;
+        }
+
         function renderSimilarResult(data) {
             referenceResultTitle.textContent = '示例目标分割结果（SAM+box）';
             resultImageTitle.textContent = '图2相似目标比对结果';
@@ -2127,61 +2308,51 @@
             const translatedPromptText = data.translated_prompt || queryResults.find((item) => item.translated_prompt)?.translated_prompt || '';
             const rawScoreType = data.profile?.score_type || queryResults[0]?.profile?.score_type || '';
             const scoreTypeLabel = rawScoreType === 'sam_grounding_score' ? 'SAM 分割置信度' : (rawScoreType || 'SAM 分割置信度');
+            const queryProcessingMs = sumNumeric(queryResults, (item) => item.processing_time_ms);
+            const estimatedReferenceMs = isFiniteNumber(data.processing_time_ms)
+                ? Math.max(0, data.processing_time_ms - queryProcessingMs)
+                : null;
+            const profileSource = data.profile || {};
+            const aggregateProfile = {
+                set_query_ms: isFiniteNumber(profileSource.set_query_ms) ? profileSource.set_query_ms : sumNumeric(queryResults, (item) => item.profile?.set_query_ms),
+                reference_prompt_encode_ms: isFiniteNumber(profileSource.reference_prompt_encode_ms) ? profileSource.reference_prompt_encode_ms : sumNumeric(queryResults, (item) => item.profile?.reference_prompt_encode_ms),
+                grounding_forward_ms: isFiniteNumber(profileSource.grounding_forward_ms) ? profileSource.grounding_forward_ms : sumNumeric(queryResults, (item) => item.profile?.grounding_forward_ms),
+                candidate_loop_ms: isFiniteNumber(profileSource.candidate_loop_ms) ? profileSource.candidate_loop_ms : sumNumeric(queryResults, (item) => item.profile?.candidate_loop_ms),
+                negative_reference_prompt_encode_ms: isFiniteNumber(profileSource.negative_reference_prompt_encode_ms) ? profileSource.negative_reference_prompt_encode_ms : sumNumeric(queryResults, (item) => item.profile?.negative_reference_prompt_encode_ms),
+                negative_grounding_forward_ms: isFiniteNumber(profileSource.negative_grounding_forward_ms) ? profileSource.negative_grounding_forward_ms : sumNumeric(queryResults, (item) => item.profile?.negative_grounding_forward_ms),
+                raw_visual_prompt_candidates: isFiniteNumber(profileSource.raw_visual_prompt_candidates) ? profileSource.raw_visual_prompt_candidates : sumNumeric(queryResults, (item) => item.profile?.raw_visual_prompt_candidates),
+                post_nms_candidates: isFiniteNumber(profileSource.post_nms_candidates) ? profileSource.post_nms_candidates : sumNumeric(queryResults, (item) => item.profile?.post_nms_candidates),
+                negative_raw_visual_prompt_candidates: isFiniteNumber(profileSource.negative_raw_visual_prompt_candidates) ? profileSource.negative_raw_visual_prompt_candidates : sumNumeric(queryResults, (item) => item.profile?.negative_raw_visual_prompt_candidates),
+                negative_post_nms_candidates: isFiniteNumber(profileSource.negative_post_nms_candidates) ? profileSource.negative_post_nms_candidates : sumNumeric(queryResults, (item) => item.profile?.negative_post_nms_candidates),
+                negative_filter_candidates: isFiniteNumber(profileSource.negative_filter_candidates) ? profileSource.negative_filter_candidates : sumNumeric(queryResults, (item) => item.profile?.negative_filter_candidates),
+                suppressed_by_negative_samples: isFiniteNumber(profileSource.suppressed_by_negative_samples) ? profileSource.suppressed_by_negative_samples : sumNumeric(queryResults, (item) => item.profile?.suppressed_by_negative_samples),
+                max_visual_prompt_candidates: isFiniteNumber(profileSource.max_visual_prompt_candidates) ? profileSource.max_visual_prompt_candidates : queryResults.find((item) => isFiniteNumber(item.profile?.max_visual_prompt_candidates))?.profile?.max_visual_prompt_candidates,
+            };
 
             resultInfo.innerHTML = `
-                <div class="info-card">
-                    <div class="info-label">待识别图数量</div>
-                    <div class="info-value">${Number(data.batch_size || queryResults.length)} 张</div>
-                </div>
-                <div class="info-card">
-                    <div class="info-label">候选框总数</div>
-                    <div class="info-value">${totalCandidates} 个</div>
-                </div>
-                <div class="info-card">
-                    <div class="info-label">匹配结果总数</div>
-                    <div class="info-value">${totalMatches} 个</div>
-                </div>
-                <div class="info-card">
-                    <div class="info-label">样例数量</div>
-                    <div class="info-value">${Number(data.num_samples ?? queryResults[0]?.num_samples ?? 1)} 个</div>
-                </div>
-                <div class="info-card">
-                    <div class="info-label">SAM 阈值</div>
-                    <div class="info-value">${Number(data.sam_threshold ?? queryResults[0]?.sam_threshold ?? 0).toFixed(2)}</div>
-                </div>
-                <div class="info-card">
-                    <div class="info-label">NMS IoU</div>
-                    <div class="info-value">${Number(data.nms_iou ?? queryResults[0]?.nms_iou ?? 0.45).toFixed(2)}</div>
-                </div>
-                <div class="info-card">
-                    <div class="info-label">分数类型</div>
-                    <div class="info-value">${escapeHtml(scoreTypeLabel)}</div>
-                </div>
-                <div class="info-card">
-                    <div class="info-label">样图框来源</div>
-                    <div class="info-value">${data.reference_box_auto_generated ? '自动生成' : '手工输入'}</div>
-                </div>
-                <div class="info-card">
-                    <div class="info-label">文本描述</div>
-                    <div class="info-value">${escapeHtml(promptText || '-')}</div>
-                </div>
-                <div class="info-card">
-                    <div class="info-label">翻译描述</div>
-                    <div class="info-value">${escapeHtml(translatedPromptText || '-')}</div>
-                </div>
-                <div class="info-card">
-                    <div class="info-label">处理时间</div>
-                    <div class="info-value">${processingTime}</div>
-                </div>
+                ${metricCard('待识别图数量', `${Number(data.batch_size || queryResults.length)} 张`)}
+                ${metricCard('候选框总数(raw)', `${totalCandidates} 个`)}
+                ${metricCard('匹配结果总数', `${totalMatches} 个`)}
+                ${metricCard('样例数量', `${Number(data.num_samples ?? queryResults[0]?.num_samples ?? 1)} 个`)}
+                ${metricCard('SAM 阈值', Number(data.sam_threshold ?? queryResults[0]?.sam_threshold ?? 0).toFixed(2))}
+                ${metricCard('NMS IoU', Number(data.nms_iou ?? queryResults[0]?.nms_iou ?? 0.45).toFixed(2))}
+                ${metricCard('分数类型', scoreTypeLabel)}
+                ${metricCard('样图框来源', data.reference_box_auto_generated ? '自动生成' : '手工输入')}
+                ${metricCard('文本描述', promptText || '-')}
+                ${metricCard('翻译描述', translatedPromptText || '-')}
+                ${metricCard('总处理时间', processingTime)}
+                ${metricCard('Query累计耗时', formatMs(queryProcessingMs))}
+                ${metricCard('样例预处理估算', isFiniteNumber(estimatedReferenceMs) ? formatMs(estimatedReferenceMs) : '-')}
+                ${metricCard('Query特征累计', formatMs(aggregateProfile.set_query_ms))}
+                ${metricCard('Prompt编码累计', formatMs(aggregateProfile.reference_prompt_encode_ms))}
+                ${metricCard('Grounding累计', formatMs(aggregateProfile.grounding_forward_ms))}
+                ${metricCard('候选后处理累计', formatMs(aggregateProfile.candidate_loop_ms))}
+                ${metricCard('NMS后候选累计', `${formatCount(aggregateProfile.post_nms_candidates)} 个`)}
+                ${metricCard('候选处理上限', `${formatCount(aggregateProfile.max_visual_prompt_candidates)} 个`)}
+                ${metricCard('负样本Grounding', formatMs(aggregateProfile.negative_grounding_forward_ms))}
             `;
 
-            if (data.reference_result_image || queryResults[0]?.reference_result_image) {
-                referenceResultImage.style.display = 'block';
-                referenceResultImage.src = `/results/${data.reference_result_image || queryResults[0].reference_result_image}?t=${Date.now()}`;
-            } else {
-                referenceResultImage.style.display = 'none';
-                referenceResultImage.removeAttribute('src');
-            }
+            renderReferenceResultImages(collectReferenceResultImages(data, queryResults));
 
             if (queryResults.length === 1 && queryResults[0].result_image) {
                 resultImage.style.display = 'block';
@@ -2194,6 +2365,9 @@
             queryResultsList.innerHTML = queryResults.map((item, index) => {
                 const labels = Array.isArray(item.pic_labels) ? item.pic_labels : [];
                 const topItems = renderTopItems(labels);
+                const profile = item.profile || {};
+                const timingRows = renderTimingRows(profile);
+                const groupTimingRows = renderGroupTimingRows(profile.groups);
                 const resultImageHtml = item.result_image
                     ? `<img src="/results/${item.result_image}?t=${Date.now()}" class="preview-image" alt="比对结果 ${index + 1}">`
                     : '<div class="hint">暂无可视化结果</div>';
@@ -2201,10 +2375,13 @@
                     <div class="query-result-card">
                         <div class="query-result-title">#${index + 1} ${escapeHtml(item.query_name || item.pic_id || 'query image')}</div>
                         <div class="query-result-meta">
-                            候选框 ${Number(item.num_candidates || 0)} 个，
+                            候选(raw) ${Number(item.num_candidates || 0)} 个，
+                            NMS后 ${formatCount(profile.post_nms_candidates)} 个，
                             匹配 ${Number(item.num_matches || 0)} 个，
                             用时 ${typeof item.processing_time_ms === 'number' ? `${(item.processing_time_ms / 1000).toFixed(2)}s` : '-'}
                         </div>
+                        ${timingRows}
+                        ${groupTimingRows}
                         ${resultImageHtml}
                         <div class="hint">Top 匹配详情</div>
                         <div style="margin-top:8px;">${topItems || '暂无匹配结果'}</div>
@@ -2425,6 +2602,7 @@
                     }
                     referenceResultImage.style.display = 'none';
                     referenceResultImage.removeAttribute('src');
+                    referenceResultsList.innerHTML = '';
                     queryResultsList.innerHTML = '';
                     resultSection.classList.add('show');
                 } else {

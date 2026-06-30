@@ -193,6 +193,35 @@ class MultiSimilarObjectRequest(BaseModel):
         return self
 
 
+class SimilarObjectByUrlRequest(BaseModel):
+    pic_id: str = Field(..., min_length=1, max_length=128, description="Client image ID")
+    download_url: str = Field(..., min_length=1, description="Base URL used to download relative sample/query paths")
+    sample_url: str = Field(..., min_length=1, description="Remote sample manifest path or URL")
+    query_image_url: str = Field(..., min_length=1, description="Remote query image path or URL")
+    top_k: int = Field(default=5, ge=1, le=50, description="Max results kept per category after NMS")
+    similarity_threshold: float = Field(default=0.6, ge=-1.0, le=1.0)
+    sam_threshold: float = Field(default=0.6, ge=0.0, le=1.0)
+    nms_iou: float = Field(default=0.45, ge=0.0, le=1.0)
+    polygon_simplify_epsilon: float = Field(default=2.0, ge=0.0, le=50.0)
+    return_result_image: bool = Field(default=False)
+
+
+class SimilarObjectTaskCreateRequest(BaseModel):
+    task_id: str = Field(..., min_length=1, max_length=128)
+    download_url: str = Field(..., min_length=1, description="Base URL used to download relative paths")
+    data_type: int = Field(default=0, description="0=image list; other values are reserved")
+    data_url: str = Field(..., min_length=1, description="Remote image list manifest path or URL")
+    sample_url: str = Field(..., min_length=1, description="Remote sample manifest path or URL")
+    infer_batch_size: int = Field(default=16, ge=1, le=64)
+    top_k: int = Field(default=5, ge=1, le=50)
+    similarity_threshold: float = Field(default=0.6, ge=-1.0, le=1.0)
+    sam_threshold: float = Field(default=0.6, ge=0.0, le=1.0)
+    nms_iou: float = Field(default=0.45, ge=0.0, le=1.0)
+    polygon_simplify_epsilon: float = Field(default=2.0, ge=0.0, le=50.0)
+    return_result_image: bool = Field(default=False)
+    result_ttl_seconds: int = Field(default=86400, ge=60, le=604800)
+
+
 class CreateApiKeyRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=128)
     role: Literal["client", "admin"] = Field(default="client")
