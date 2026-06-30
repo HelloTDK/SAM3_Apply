@@ -697,7 +697,7 @@ Long polling 语义：
 | `label_sample_data[].image_url` | 是 | string | 样例图路径或完整 HTTP URL |
 | `label_sample_data[].image_id` | 否 | string | 样例图 ID；缺省时从文件名生成 |
 | `image_mark[].mark_info` | 是 | string/object/array | 样例框信息。推荐传包含 `x/y/width/height` 的 object 或 object-string，也兼容 `[x, y, width, height]` 数组 |
-| `image_mark[].sample_type` | 否 | string | `"1"` 表示正样本，`"0"` 表示负样本；缺省按正样本处理 |
+| `image_mark[].sample_type` | 否 | string/integer | `1/"1"` 表示正样本，`0/"0"` 表示负样本；也兼容 `positive/negative`；缺省按正样本处理 |
 
 限制和规则：
 

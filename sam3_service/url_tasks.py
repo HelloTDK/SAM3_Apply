@@ -150,7 +150,10 @@ def parse_sample_manifest_text(text: str, download_url: str) -> List[Dict[str, A
                     mark.get("mark_info"),
                     f"sample_url[{label_index}].label_sample_data[{image_index}].image_mark[{mark_index}].mark_info",
                 )
-                raw_sample_type = str(mark.get("sample_type", "1") or "1").strip()
+                raw_sample_type_value = mark.get("sample_type", "1")
+                if raw_sample_type_value is None:
+                    raw_sample_type_value = "1"
+                raw_sample_type = str(raw_sample_type_value).strip().lower()
                 sample_type = "negative" if raw_sample_type in {"0", "negative", "neg", "false"} else "positive"
                 instance_count += 1
                 if instance_count > SAMPLE_INSTANCE_LIMIT:

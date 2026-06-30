@@ -1556,8 +1556,11 @@ def _nms_multi_similar_records(
 
 def _normalize_sample_type(sample: Dict[str, Any]) -> str:
     """把 sample_type/role/is_negative 统一归一成 positive 或 negative。"""
-    raw_sample_type = _normalize_prompt_label(str(sample.get("sample_type", sample.get("role", "")) or "")).lower()
-    if raw_sample_type in {"negative", "neg"} or sample.get("is_negative") is True:
+    raw_sample_type_value = sample.get("sample_type", sample.get("role", ""))
+    if raw_sample_type_value is None:
+        raw_sample_type_value = ""
+    raw_sample_type = _normalize_prompt_label(str(raw_sample_type_value).strip()).lower()
+    if raw_sample_type in {"0", "negative", "neg", "false"} or sample.get("is_negative") is True:
         return "negative"
     return "positive"
 
