@@ -679,7 +679,7 @@ Long polling 语义：
             "sample_type": "1"
           },
           {
-            "mark_info": "{\"rotation\":0,\"x\":435.812,\"width\":83.188,\"y\":339.864,\"height\":201.144}",
+            "mark_info": [435.812, 339.864, 83.188, 201.144],
             "sample_type": "0"
           }
         ]
@@ -696,7 +696,7 @@ Long polling 语义：
 | `label_id` | 是 | string | 类别名称，会作为输出 `pic_labels[].category` |
 | `label_sample_data[].image_url` | 是 | string | 样例图路径或完整 HTTP URL |
 | `label_sample_data[].image_id` | 否 | string | 样例图 ID；缺省时从文件名生成 |
-| `image_mark[].mark_info` | 是 | string/object | 样例框信息，必须包含 `x/y/width/height` |
+| `image_mark[].mark_info` | 是 | string/object/array | 样例框信息。推荐传包含 `x/y/width/height` 的 object 或 object-string，也兼容 `[x, y, width, height]` 数组 |
 | `image_mark[].sample_type` | 否 | string | `"1"` 表示正样本，`"0"` 表示负样本；缺省按正样本处理 |
 
 限制和规则：
@@ -705,6 +705,7 @@ Long polling 语义：
 - 最多支持 `2000` 个样例实例。
 - 至少需要一个正样本。
 - `rotation` 当前接受但不参与计算；坐标仍按水平矩形 `[x,y,width,height]` 处理。
+- `mark_info` 推荐使用 object 或 object-string；为兼容旧数据，当前也支持 `[x, y, width, height]` 数组格式。
 - 样例图会按图片聚合，同一张样例图只提取一次特征。
 - 样例 prompt embedding 会缓存；相同 `download_url + sample_url + sample_url内容 + top_k` 命中缓存时，不重复下载样例图和编码样例 prompt。
 

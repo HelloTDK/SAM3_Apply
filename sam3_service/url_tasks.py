@@ -78,8 +78,21 @@ def _load_json_from_text(text: str, source_name: str) -> Any:
 def _parse_mark_info(mark_info: Any, field_name: str) -> List[float]:
     if isinstance(mark_info, str):
         mark_info = _load_json_from_text(mark_info, field_name)
+    if isinstance(mark_info, (list, tuple)):
+        if len(mark_info) != 4:
+            raise ValueError(f"{field_name} array must contain [x, y, width, height]")
+        try:
+            x = float(mark_info[0])
+            y = float(mark_info[1])
+            w = float(mark_info[2])
+            h = float(mark_info[3])
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{field_name} array must contain numeric x/y/width/height") from exc
+        if w <= 0 or h <= 0:
+            raise ValueError(f"{field_name} width/height must be > 0")
+        return [x, y, w, h]
     if not isinstance(mark_info, dict):
-        raise ValueError(f"{field_name} must be a JSON object or object string")
+        raise ValueError(f"{field_name} must be a JSON object/object string or [x, y, width, height] array")
     try:
         x = float(mark_info["x"])
         y = float(mark_info["y"])
