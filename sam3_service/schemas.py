@@ -209,10 +209,11 @@ class SimilarObjectByUrlRequest(BaseModel):
 class SimilarObjectTaskCreateRequest(BaseModel):
     task_id: str = Field(..., min_length=1, max_length=128)
     download_url: str = Field(..., min_length=1, description="Base URL used to download relative paths")
-    data_type: int = Field(default=0, description="0=image list; other values are reserved")
-    data_url: str = Field(..., min_length=1, description="Remote image list manifest path or URL")
+    data_type: int = Field(default=0, description="0=image list; non-zero values are treated as video list")
+    data_url: str = Field(..., min_length=1, description="Remote image/video list manifest path or URL")
     sample_url: str = Field(..., min_length=1, description="Remote sample manifest path or URL")
     infer_batch_size: int = Field(default=16, ge=1, le=64)
+    frame_time: int = Field(default=1, ge=0, description="Video sampling interval in frames; 0 means every frame")
     top_k: int = Field(default=5, ge=1, le=50)
     similarity_threshold: float = Field(default=0.6, ge=-1.0, le=1.0)
     sam_threshold: float = Field(default=0.6, ge=0.0, le=1.0)

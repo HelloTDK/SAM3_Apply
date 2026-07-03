@@ -1,14 +1,18 @@
 """URL/manifest based similar-object task helpers for SAM3 service."""
 
+import base64
 import hashlib
 import io
 import json
+import os
+import tempfile
 import threading
 import time
 from collections import OrderedDict
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
+import cv2
 import requests
 from PIL import Image
 
@@ -22,6 +26,7 @@ from .runtime import (
 SAMPLE_IMAGE_LIMIT = 300
 SAMPLE_INSTANCE_LIMIT = 2000
 QUERY_IMAGE_LIMIT = 5000
+QUERY_VIDEO_LIMIT = 500
 SAMPLE_STATE_CACHE_TTL_SECONDS = 3600
 SAMPLE_STATE_CACHE_MAX_ITEMS = 8
 
@@ -252,6 +257,99 @@ def load_query_items(download_url: str, data_url: str) -> List[Dict[str, str]]:
     return parse_query_manifest_text(download_text(download_url, data_url, timeout=60))
 
 
+def parse_video_manifest_text(text: str) -> List[Dict[str, str]]:
+    stripped = text.strip()
+    if not stripped:
+        raise ValueError("data_url content is empty")
+
+    items: List[Dict[str, str]] = []
+    if stripped.startswith("["):
+        raw_items = _load_json_from_text(stripped, "data_url")
+        if not isinstance(raw_items, list):
+            raise ValueError("data_url JSON content must be an array")
+        for index, item in enumerate(raw_items):
+            if isinstance(item, str):
+                video_url = item.strip()
+                video_id = _stable_id_from_path(video_url)
+            elif isinstance(item, dict):
+                video_url = str(
+                    item.get("video_url")
+                    or item.get("url")
+                    or item.get("path")
+                    or ""
+                ).strip()
+                video_id = str(
+                    item.get("video_id")
+                    or item.get("relationId")
+                    or item.get("id")
+                    or ""
+                ).strip() or _stable_id_from_path(video_url)
+            else:
+                continue
+            if not video_url:
+                raise ValueError(f"data_url[{index}].video_url is required")
+            items.append({"video_id": video_id, "video_url": video_url})
+    else:
+        for line_index, line in enumerate(stripped.splitlines(), start=1):
+            line = line.strip()
+            if not line:
+                continue
+            if "=" in line:
+                video_id, video_url = line.split("=", 1)
+                video_id = video_id.strip() or f"video_{line_index}"
+                video_url = video_url.strip()
+            else:
+                video_url = line
+                video_id = _stable_id_from_path(video_url) or f"video_{line_index}"
+            if not video_url:
+                continue
+            items.append({"video_id": video_id, "video_url": video_url})
+
+    if not items:
+        raise ValueError("data_url contains no query videos")
+    if len(items) > QUERY_VIDEO_LIMIT:
+        raise ValueError(f"query videos exceed limit: {QUERY_VIDEO_LIMIT}")
+    return items
+
+
+def load_video_items(download_url: str, data_url: str) -> List[Dict[str, str]]:
+    return parse_video_manifest_text(download_text(download_url, data_url, timeout=60))
+
+
+def download_video_to_tempfile(download_url: str, remote_path: str, *, timeout: int = 300) -> str:
+    url = resolve_remote_url(download_url, remote_path)
+    suffix = os.path.splitext(urlparse(url).path)[1] or ".mp4"
+    temp_file = tempfile.NamedTemporaryFile(prefix="sam3_query_video_", suffix=suffix, delete=False)
+    temp_path = temp_file.name
+    try:
+        with temp_file:
+            with requests.get(url, timeout=timeout, stream=True) as response:
+                response.raise_for_status()
+                for chunk in response.iter_content(chunk_size=1024 * 1024):
+                    if chunk:
+                        temp_file.write(chunk)
+        return temp_path
+    except Exception:
+        try:
+            os.remove(temp_path)
+        except OSError:
+            pass
+        raise
+
+
+def _estimate_sampled_frames(total_frames: int, frame_interval: int) -> int:
+    if total_frames <= 0:
+        return 0
+    return 1 + (total_frames - 1) // frame_interval
+
+
+def _encode_frame_to_base64(frame_bgr: Any) -> str:
+    ok, encoded = cv2.imencode(".jpg", frame_bgr)
+    if not ok:
+        return ""
+    return base64.b64encode(encoded.tobytes()).decode("utf-8")
+
+
 class SampleStateCache:
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -347,6 +445,7 @@ class SimilarObjectTask:
     def __init__(self, request: Any):
         self.task_id = request.task_id
         self.request = request
+        self.data_type = int(getattr(request, "data_type", 0) or 0)
         self.status = "pending"
         self.message = "pending"
         self.created = int(time.time())
@@ -355,45 +454,59 @@ class SimilarObjectTask:
         self.processed = 0
         self.success_count = 0
         self.fail_count = 0
+        self.videos_total = 0
+        self.videos_processed = 0
+        self.current_video_id = ""
+        self.current_video_name = ""
+        self.current_frame_num = 0
+        self.current_total_frames = 0
+        self.frame_interval = max(1, int(getattr(request, "frame_time", 0) or 0)) or 1
         self.results: List[Dict[str, Any]] = []
         self.result_ttl_seconds = int(getattr(request, "result_ttl_seconds", 86400) or 86400)
         self.cancel_event = threading.Event()
         self.lock = threading.Lock()
         self.condition = threading.Condition(self.lock)
 
+    def _build_snapshot_unlocked(self) -> Dict[str, Any]:
+        return {
+            "success": True,
+            "task_id": self.task_id,
+            "data_type": self.data_type,
+            "status": self.status,
+            "total": self.total,
+            "processed": self.processed,
+            "success_count": self.success_count,
+            "fail_count": self.fail_count,
+            "message": self.message,
+            "created": self.created,
+            "updated": self.updated,
+            "videos_total": self.videos_total,
+            "videos_processed": self.videos_processed,
+            "current_video_id": self.current_video_id,
+            "current_video_name": self.current_video_name,
+            "current_frame_num": self.current_frame_num,
+            "current_total_frames": self.current_total_frames,
+            "frame_interval": self.frame_interval,
+        }
+
     def snapshot(self) -> Dict[str, Any]:
         with self.lock:
-            return {
-                "success": True,
-                "task_id": self.task_id,
-                "status": self.status,
-                "total": self.total,
-                "processed": self.processed,
-                "success_count": self.success_count,
-                "fail_count": self.fail_count,
-                "message": self.message,
-                "created": self.created,
-                "updated": self.updated,
-            }
+            return self._build_snapshot_unlocked()
 
     def result_page(self, offset: int, limit: int) -> Dict[str, Any]:
         with self.lock:
             safe_offset = max(0, int(offset))
             safe_limit = max(1, min(int(limit), 500))
-            return {
-                "success": True,
-                "task_id": self.task_id,
-                "status": self.status,
-                "processed": self.processed,
-                "success_count": self.success_count,
-                "fail_count": self.fail_count,
-                "message": self.message,
-                "offset": safe_offset,
-                "limit": safe_limit,
-                "total": self.total,
-                "result_total": len(self.results),
-                "items": self.results[safe_offset : safe_offset + safe_limit],
-            }
+            payload = self._build_snapshot_unlocked()
+            payload.update(
+                {
+                    "offset": safe_offset,
+                    "limit": safe_limit,
+                    "result_total": len(self.results),
+                    "items": self.results[safe_offset : safe_offset + safe_limit],
+                }
+            )
+            return payload
 
     def wait_result_page(self, offset: int, limit: int, wait_timeout: float = 0.0) -> Dict[str, Any]:
         safe_offset = max(0, int(offset))
@@ -410,20 +523,16 @@ class SimilarObjectTask:
                 if remaining <= 0:
                     break
                 self.condition.wait(timeout=remaining)
-            return {
-                "success": True,
-                "task_id": self.task_id,
-                "status": self.status,
-                "processed": self.processed,
-                "success_count": self.success_count,
-                "fail_count": self.fail_count,
-                "message": self.message,
-                "offset": safe_offset,
-                "limit": safe_limit,
-                "total": self.total,
-                "result_total": len(self.results),
-                "items": self.results[safe_offset : safe_offset + safe_limit],
-            }
+            payload = self._build_snapshot_unlocked()
+            payload.update(
+                {
+                    "offset": safe_offset,
+                    "limit": safe_limit,
+                    "result_total": len(self.results),
+                    "items": self.results[safe_offset : safe_offset + safe_limit],
+                }
+            )
+            return payload
 
     def update(self, **kwargs: Any) -> None:
         with self.condition:
@@ -487,12 +596,8 @@ class SimilarObjectTaskRegistry:
     def _run_task(self, task: SimilarObjectTask) -> None:
         request = task.request
         try:
-            if int(request.data_type) != 0:
-                raise ValueError("URL sample task currently supports data_type=0 only")
             task.update(status="running", message="loading manifests")
             parsed_samples, manifest_hash = load_sample_manifest(request.download_url, request.sample_url)
-            query_items = load_query_items(request.download_url, request.data_url)
-            task.update(total=len(query_items), message="preparing sample prompts")
             sample_state = build_sample_state(
                 download_url=request.download_url,
                 sample_url=request.sample_url,
@@ -500,44 +605,158 @@ class SimilarObjectTaskRegistry:
                 manifest_hash=manifest_hash,
                 samples=parsed_samples,
             )
-            task.update(message="running")
-            for query_item in query_items:
-                if task.cancel_event.is_set():
-                    task.update(status="cancelled", message="cancelled")
-                    return
-                pic_id = query_item["image_id"]
-                try:
-                    query_image = download_image(request.download_url, query_item["image_url"], timeout=60)
-                    result = run_multi_visual_prompt_query_with_state(
-                        sample_state,
-                        query_image,
-                        request.top_k,
-                        request.similarity_threshold,
-                        request.sam_threshold,
-                        request.nms_iou,
-                        request.polygon_simplify_epsilon,
-                        pic_id,
-                        return_result_image=request.return_result_image,
-                    )
-                    task.append_result(
-                        {
-                            "pic_id": pic_id,
-                            "status": 1,
-                            "message": "标注成功",
-                            "pic_labels": result.get("pic_labels", []),
-                        },
-                        success=True,
-                    )
-                except Exception as exc:
-                    task.append_result(
-                        {
-                            "pic_id": pic_id,
-                            "status": 0,
-                            "message": str(exc),
-                            "pic_labels": [],
-                        },
-                        success=False,
-                    )
+            if int(request.data_type) == 0:
+                query_items = load_query_items(request.download_url, request.data_url)
+                task.update(total=len(query_items), message="running")
+                for query_item in query_items:
+                    if task.cancel_event.is_set():
+                        task.update(status="cancelled", message="cancelled")
+                        return
+                    pic_id = query_item["image_id"]
+                    try:
+                        query_image = download_image(request.download_url, query_item["image_url"], timeout=60)
+                        result = run_multi_visual_prompt_query_with_state(
+                            sample_state,
+                            query_image,
+                            request.top_k,
+                            request.similarity_threshold,
+                            request.sam_threshold,
+                            request.nms_iou,
+                            request.polygon_simplify_epsilon,
+                            pic_id,
+                            return_result_image=request.return_result_image,
+                        )
+                        task.append_result(
+                            {
+                                "pic_id": pic_id,
+                                "status": 1,
+                                "message": "标注成功",
+                                "pic_labels": result.get("pic_labels", []),
+                            },
+                            success=True,
+                        )
+                    except Exception as exc:
+                        task.append_result(
+                            {
+                                "pic_id": pic_id,
+                                "status": 0,
+                                "message": str(exc),
+                                "pic_labels": [],
+                            },
+                            success=False,
+                        )
+            else:
+                video_items = load_video_items(request.download_url, request.data_url)
+                frame_interval = max(1, int(getattr(request, "frame_time", 0) or 0))
+                task.update(videos_total=len(video_items), frame_interval=frame_interval, message="running")
+                for video_item in video_items:
+                    if task.cancel_event.is_set():
+                        task.update(status="cancelled", message="cancelled")
+                        return
+
+                    video_id = str(video_item["video_id"])
+                    video_url = str(video_item["video_url"])
+                    video_name = os.path.basename(urlparse(resolve_remote_url(request.download_url, video_url)).path) or f"{video_id}.mp4"
+                    local_video_path = download_video_to_tempfile(request.download_url, video_url)
+                    try:
+                        cap = cv2.VideoCapture(local_video_path)
+                        if not cap.isOpened():
+                            raise ValueError(f"Failed to open video: {video_url}")
+                        try:
+                            try:
+                                total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                            except Exception:
+                                total_frames = 0
+                            sampled_frames = _estimate_sampled_frames(total_frames, frame_interval)
+                            task.update(
+                                total=task.total + sampled_frames,
+                                current_video_id=video_id,
+                                current_video_name=video_name,
+                                current_frame_num=0,
+                                current_total_frames=total_frames,
+                            )
+
+                            fps = float(cap.get(cv2.CAP_PROP_FPS))
+                            if fps <= 0:
+                                fps = 25.0
+
+                            frame_num = 0
+                            while cap.isOpened():
+                                if task.cancel_event.is_set():
+                                    task.update(status="cancelled", message="cancelled")
+                                    return
+
+                                ok, frame_bgr = cap.read()
+                                if not ok:
+                                    break
+
+                                task.update(
+                                    current_video_id=video_id,
+                                    current_video_name=video_name,
+                                    current_frame_num=frame_num + 1,
+                                    current_total_frames=total_frames,
+                                )
+
+                                if frame_num % frame_interval != 0:
+                                    frame_num += 1
+                                    continue
+
+                                pic_id = f"{task.task_id}_{video_id}_{frame_num}"
+                                timestamp = float(cap.get(cv2.CAP_PROP_POS_MSEC) or 0.0)
+                                try:
+                                    frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+                                    query_image = Image.fromarray(frame_rgb)
+                                    result = run_multi_visual_prompt_query_with_state(
+                                        sample_state,
+                                        query_image,
+                                        request.top_k,
+                                        request.similarity_threshold,
+                                        request.sam_threshold,
+                                        request.nms_iou,
+                                        request.polygon_simplify_epsilon,
+                                        pic_id,
+                                        return_result_image=request.return_result_image,
+                                    )
+                                    pic_labels = result.get("pic_labels", [])
+                                    task.append_result(
+                                        {
+                                            "pic_id": pic_id,
+                                            "status": 1,
+                                            "message": "标注成功",
+                                            "pic_labels": pic_labels,
+                                            "timestamp": timestamp,
+                                            "frame_num": frame_num,
+                                            "fps": round(float(fps), 3),
+                                            "video_id": video_id,
+                                            "video_name": video_name,
+                                            "frame_image_base64": _encode_frame_to_base64(frame_bgr) if pic_labels else "",
+                                        },
+                                        success=True,
+                                    )
+                                except Exception as exc:
+                                    task.append_result(
+                                        {
+                                            "pic_id": pic_id,
+                                            "status": 0,
+                                            "message": str(exc),
+                                            "pic_labels": [],
+                                            "timestamp": timestamp,
+                                            "frame_num": frame_num,
+                                            "fps": round(float(fps), 3),
+                                            "video_id": video_id,
+                                            "video_name": video_name,
+                                        },
+                                        success=False,
+                                    )
+                                frame_num += 1
+                        finally:
+                            cap.release()
+                        task.update(videos_processed=task.videos_processed + 1)
+                    finally:
+                        try:
+                            os.remove(local_video_path)
+                        except OSError:
+                            pass
             task.update(status="completed", message="completed")
         except Exception as exc:
             task.update(status="failed", message=str(exc))

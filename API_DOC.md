@@ -501,6 +501,7 @@ Authorization: Bearer <api_key>
   "data_url": "/group1/default/path/images.txt",
   "sample_url": "/group1/default/path/sample.txt",
   "infer_batch_size": 16,
+  "frame_time": 25,
   "top_k": 5,
   "sam_threshold": 0.6,
   "similarity_threshold": 0.6,
@@ -517,10 +518,11 @@ Authorization: Bearer <api_key>
 | --- | --- | --- | --- |
 | `task_id` | 是 | string | 任务 ID；重复 running 任务会返回错误 |
 | `download_url` | 是 | string | 下载服务根地址 |
-| `data_type` | 否 | integer | 当前仅支持 `0`，表示图片清单 |
-| `data_url` | 是 | string | 待标注图片清单路径或完整 HTTP URL |
+| `data_type` | 否 | integer | `0` 表示图片清单；非 `0` 表示视频清单 |
+| `data_url` | 是 | string | 待标注图片/视频清单路径或完整 HTTP URL |
 | `sample_url` | 是 | string | 样例标注文件路径或完整 HTTP URL |
 | `infer_batch_size` | 否 | integer | 预留分批参数，默认 `16`，范围 `1-64` |
+| `frame_time` | 否 | integer | 视频抽帧间隔，按帧数计；`0` 表示逐帧，默认 `1` |
 | `top_k` | 否 | integer | 每个类别最多保留结果数，默认 `5` |
 | `sam_threshold` | 否 | number | SAM3 grounding 分数阈值，默认 `0.6` |
 | `similarity_threshold` | 否 | number | 兼容字段；当前不执行余弦相似度过滤 |
@@ -557,10 +559,18 @@ Authorization: Bearer <api_key>
   "success": true,
   "task_id": "BATCH-LM-001",
   "status": "running",
+  "data_type": 1,
   "total": 5000,
   "processed": 640,
   "success_count": 632,
   "fail_count": 8,
+  "videos_total": 4,
+  "videos_processed": 1,
+  "current_video_id": "video-002",
+  "current_video_name": "video-002.mp4",
+  "current_frame_num": 325,
+  "current_total_frames": 1200,
+  "frame_interval": 25,
   "message": "running",
   "created": 1779340000,
   "updated": 1779340300
@@ -608,6 +618,7 @@ Long polling 语义：
   "success": true,
   "task_id": "BATCH-LM-001",
   "status": "running",
+  "data_type": 0,
   "processed": 640,
   "success_count": 632,
   "fail_count": 8,
@@ -635,6 +646,17 @@ Long polling 语义：
   ]
 }
 ```
+
+当 `data_type != 0` 时，`items` 中每一项表示一个抽样帧，除 `pic_labels` 外还会附带：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `timestamp` | number | 当前帧时间戳，单位毫秒 |
+| `frame_num` | integer | 帧序号，从 `0` 开始 |
+| `fps` | number | 视频 FPS |
+| `video_id` | string | 视频 ID |
+| `video_name` | string | 视频文件名 |
+| `frame_image_base64` | string | 当前帧 JPEG Base64；仅当该帧识别到目标时返回，供上层回传 `pic_url` 使用 |
 
 上层服务轮询策略：
 
@@ -742,7 +764,7 @@ image-002=/group1/default/path/image002.jpg
 
 限制：
 
-- 当前 URL 批量任务仅支持图片清单，即 `data_type=0`。
+- URL 批量任务支持图片清单和视频清单；视频模式下会由服务端下载视频、按 `frame_time` 抽帧后再执行样例标注。
 - 单任务最多 `5000` 张待标注图片。
 - 每张图片大小受服务端 `SAM3_MAX_IMAGE_BYTES` 限制，默认 `20MB`。
 
