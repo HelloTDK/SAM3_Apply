@@ -55,7 +55,7 @@ ULTRALYTICS_IOU = float(os.getenv("SAM3_ULTRALYTICS_IOU", "0.7"))
 ULTRALYTICS_VERBOSE = _env_bool("SAM3_ULTRALYTICS_VERBOSE", "0")
 VISUAL_PROMPT_MAX_CANDIDATES = max(1, int(os.getenv("SAM3_VISUAL_PROMPT_MAX_CANDIDATES", "32")))
 SIMILAR_MODES = {"feature_match", "same_image_prompt"}
-MULTI_NEGATIVE_FILTER_IOU = float(os.getenv("SAM3_MULTI_NEGATIVE_FILTER_IOU", "0.5"))
+MULTI_NEGATIVE_FILTER_IOU = float(os.getenv("SAM3_MULTI_NEGATIVE_FILTER_IOU", "0.1"))
 
 
 def _infer_model_label(checkpoint_path: Path) -> str:
