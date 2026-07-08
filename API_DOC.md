@@ -389,7 +389,7 @@ http://192.168.100.25:8006/results/result_20260521_101000_000003.jpg
 
 ### 3.4 URL 样例图单张标注
 
-用途：上层服务已经有远程图片路径，不希望把样例图和待标注图转成 Base64。该接口由 SAM3 服务直接下载 `sample_url` 和 `query_image_url`。
+用途：上层服务已经有远程图片路径，不希望把样例图和待标注图转成 Base64。该接口由 SAM3 服务直接下载 `sample_url` 和 `query_image_url`。如果没有正样例，也可以只传 `prompt` 走文本识别；此时 `sample_url` 可省略。
 
 `POST /v1/similar-object-segmentations/by-url`
 
@@ -407,6 +407,7 @@ Authorization: Bearer <api_key>
   "pic_id": "image-001",
   "download_url": "http://192.168.100.118:8092",
   "sample_url": "/group1/default/path/sample.txt",
+  "prompt": "人; 安全帽",
   "query_image_url": "/group1/default/path/image.jpg",
   "top_k": 5,
   "sam_threshold": 0.6,
@@ -423,7 +424,8 @@ Authorization: Bearer <api_key>
 | --- | --- | --- | --- |
 | `pic_id` | 是 | string | 客户端图片 ID |
 | `download_url` | 是 | string | 下载服务根地址。相对路径会拼接成 `{download_url}/{path}` |
-| `sample_url` | 是 | string | 样例标注文件路径或完整 HTTP URL |
+| `sample_url` | 否 | string | 样例标注文件路径或完整 HTTP URL；有正样例时使用 |
+| `prompt` | 否 | string | 顶层文本 prompt；当 `sample_url` 没有正样例或完全省略时必填，支持 `;` / `,` 分隔，中文会自动翻译 |
 | `query_image_url` | 是 | string | 待标注图片路径或完整 HTTP URL |
 | `top_k` | 否 | integer | 每个类别最多保留结果数，默认 `5`，范围 `1-50` |
 | `sam_threshold` | 否 | number | SAM3 grounding 分数阈值，默认 `0.6` |
@@ -485,7 +487,7 @@ Authorization: Bearer <api_key>
 
 ### 3.5 URL 样例图批量任务
 
-用途：一次任务包含多张样例图和大量待标注图片。该接口异步执行，避免一个 HTTP 请求长时间阻塞，也避免一次性传输大量 Base64。
+用途：一次任务包含多张样例图和大量待标注图片。该接口异步执行，避免一个 HTTP 请求长时间阻塞，也避免一次性传输大量 Base64。若没有正样例，也可以只传 `prompt`，此时 `sample_url` 可省略。
 
 创建任务：
 
@@ -500,6 +502,7 @@ Authorization: Bearer <api_key>
   "data_type": 0,
   "data_url": "/group1/default/path/images.txt",
   "sample_url": "/group1/default/path/sample.txt",
+  "prompt": "人; 安全帽",
   "infer_batch_size": 16,
   "frame_time": 25,
   "top_k": 5,
@@ -520,7 +523,8 @@ Authorization: Bearer <api_key>
 | `download_url` | 是 | string | 下载服务根地址 |
 | `data_type` | 否 | integer | `0` 表示图片清单；非 `0` 表示视频清单 |
 | `data_url` | 是 | string | 待标注图片/视频清单路径或完整 HTTP URL |
-| `sample_url` | 是 | string | 样例标注文件路径或完整 HTTP URL |
+| `sample_url` | 否 | string | 样例标注文件路径或完整 HTTP URL；有正样例时使用 |
+| `prompt` | 否 | string | 顶层文本 prompt；当 `sample_url` 没有正样例或完全省略时必填，支持 `;` / `,` 分隔，中文会自动翻译 |
 | `infer_batch_size` | 否 | integer | 预留分批参数，默认 `16`，范围 `1-64` |
 | `frame_time` | 否 | integer | 视频抽帧间隔，按帧数计；`0` 表示逐帧，默认 `1` |
 | `top_k` | 否 | integer | 每个类别最多保留结果数，默认 `5` |
@@ -725,7 +729,7 @@ Long polling 语义：
 
 - 最多支持 `300` 张样例图。
 - 最多支持 `2000` 个样例实例。
-- 至少需要一个正样本。
+- `sample_url` 可以全部是负样本；但此时请求级 `prompt` 必填。
 - `rotation` 当前接受但不参与计算；坐标仍按水平矩形 `[x,y,width,height]` 处理。
 - `mark_info` 推荐使用 object 或 object-string；为兼容旧数据，当前也支持 `[x, y, width, height]` 数组格式。
 - 样例图会按图片聚合，同一张样例图只提取一次特征。
@@ -770,7 +774,11 @@ image-002=/group1/default/path/image002.jpg
 
 ## 4. Multipart 相似识别接口
 
-前端页面统一使用 `POST /multi-similar-detect`。普通单样例就是 `sample_meta` 里只有一个正样本实例；继续添加标签、样例或实例即可扩展为多类别、多样例识别。
+前端页面统一使用 `POST /multi-similar-detect`。普通单样例就是 `sample_meta` 里只有一个正样本实例；继续添加标签、样例或实例即可扩展为多类别、多样例识别。现在也支持：
+
+- 纯文本 prompt，无需上传 `sample_file`
+- 文本 prompt + 仅负样例
+- 正样例 + 可选文本 prompt + 可选负样例
 
 ### 4.1 跨图 Feature Match 识别
 
@@ -793,6 +801,15 @@ curl -X POST 'http://192.168.100.25:8006/multi-similar-detect' \
   -F 'sample_meta=[{"file_index":0,"sample_type":"positive","category":"目标","reference_bnd_points":[120,80,260,300]}]'
 ```
 
+纯文本 prompt：
+
+```bash
+curl -X POST 'http://192.168.100.25:8006/multi-similar-detect' \
+  -F 'query_file=@/path/to/query.jpg' \
+  -F 'prompt=人;安全帽' \
+  -F 'sample_meta=[]'
+```
+
 ### 4.2 兼容旧同图拉框接口
 
 ```bash
@@ -811,9 +828,10 @@ curl -X POST 'http://192.168.100.25:8006/similar-detect' \
 
 | 字段 | 必填 | 类型 | 说明 |
 | --- | --- | --- | --- |
-| `sample_file` | 是 | file/list | 样例图；可重复传多张 |
+| `sample_file` | 条件必填 | file/list | 样例图；传了 `sample_meta` 样例实例时必填，可重复传多张 |
 | `query_file` | 是 | file/list | 待识别图；可重复传多张 |
-| `sample_meta` | 是 | string | JSON 数组，描述每个样例实例的 `file_index`、正负样本、类别和框 |
+| `sample_meta` | 否 | string | JSON 数组，描述每个样例实例的 `file_index`、正负样本、类别和框；纯文本模式可传 `[]` 或省略 |
+| `prompt` | 否 | string | 顶层文本 prompt；当没有正样例时必填，支持 `;` / `,` 分隔，中文会自动翻译 |
 | `top_k` | 否 | integer | 默认 `5` |
 | `sam_threshold` | 否 | number | SAM3 grounding 分数阈值，默认 `0.6` |
 | `similarity_threshold` | 否 | number | 兼容旧客户端字段；当前不再执行余弦相似度过滤 |
@@ -839,8 +857,9 @@ curl -X POST 'http://192.168.100.25:8006/similar-detect' \
 - `reference_bnd_points` 不是 4 个数字。
 - 非 `same_image_prompt` 模式没有传 `query_image_base64` / `query_file`。
 - 框宽高小于等于 0。
-- URL 样例标注缺少 `download_url`、`sample_url`、`query_image_url` 或 `data_url`。
-- `sample_url` 不是合法 JSON 数组，或没有任何正样本。
+- URL 样例标注缺少 `download_url`、`query_image_url` 或 `data_url`。
+- `sample_url` 不是合法 JSON 数组。
+- 既没有正样例，也没有可用 `prompt`。
 - `mark_info` 缺少 `x/y/width/height`，或框宽高小于等于 0。
 - URL 批量任务 `data_type` 不是 `0`。
 - `task_id` 对应的任务正在运行，重复创建同名任务。
@@ -866,6 +885,7 @@ curl -X POST 'http://192.168.100.25:8006/similar-detect' \
 - 示例图 A + 目标图 B 小规模调试：推荐使用 `/multi-similar-detect`。
 - 远程样例文件 + 单张远程目标图：推荐使用 `/v1/similar-object-segmentations/by-url`。
 - 远程样例文件 + 批量远程目标图：推荐使用 `/v1/similar-object-segmentations/tasks`。
+- 希望统一走 multi-similar 链路但手上没有正样例：可直接传 `prompt`，负样例可选。
 - 普通单样例 multipart 调试：`sample_meta` 只放一个正样本实例。
 - 多类别/多样例 multipart 调试：继续追加标签、样例图和实例框。
 - 同图拉框识别：旧接口仍可用 `similar_mode=same_image_prompt`。

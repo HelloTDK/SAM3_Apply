@@ -371,6 +371,7 @@ def register_routes(app: FastAPI) -> None:
                     payload.polygon_simplify_epsilon,
                     payload.pic_id,
                     None,
+                    payload.prompt,
                 )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -393,6 +394,7 @@ def register_routes(app: FastAPI) -> None:
                         run_by_url_request,
                         download_url=payload.download_url,
                         sample_url=payload.sample_url,
+                        prompt=payload.prompt,
                         query_image_url=payload.query_image_url,
                         pic_id=payload.pic_id,
                         top_k=payload.top_k,
@@ -602,7 +604,8 @@ def register_routes(app: FastAPI) -> None:
     @app.post("/multi-similar-detect")
     async def detect_multi_similar_objects(
         request: Request,
-        sample_meta: str = Form(...),
+        sample_meta: str = Form("[]"),
+        prompt: Optional[str] = Form(default=None),
         top_k: int = Form(5),
         similarity_threshold: float = Form(0.6),
         sam_threshold: float = Form(0.6),
@@ -613,8 +616,8 @@ def register_routes(app: FastAPI) -> None:
         try:
             form = await request.form()
             parsed_meta = json.loads(sample_meta)
-            if not isinstance(parsed_meta, list) or not parsed_meta:
-                raise HTTPException(status_code=400, detail="sample_meta must be a non-empty JSON array")
+            if not isinstance(parsed_meta, list):
+                raise HTTPException(status_code=400, detail="sample_meta must be a JSON array")
 
             sample_files = [
                 item
@@ -626,7 +629,7 @@ def register_routes(app: FastAPI) -> None:
                 for item in form.getlist("query_file")
                 if getattr(item, "filename", None) and hasattr(item, "read")
             ]
-            if not sample_files:
+            if parsed_meta and not sample_files:
                 raise HTTPException(status_code=400, detail="At least one sample image is required")
             if not query_files:
                 raise HTTPException(status_code=400, detail="At least one query image is required")
@@ -730,6 +733,7 @@ def register_routes(app: FastAPI) -> None:
                     polygon_simplify_epsilon,
                     pic_id,
                     query_names,
+                    (prompt or "").strip() or None,
                 )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc

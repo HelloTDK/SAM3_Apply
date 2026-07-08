@@ -433,6 +433,30 @@ def _prepare_detection_classes(prompt: str) -> Tuple[List[Dict[str, Any]], str, 
     return classes_info, translated_prompt, translated_prompt != original_prompt
 
 
+def _prepare_prompt_group_specs(prompt_text: Optional[str]) -> List[Dict[str, Any]]:
+    """把顶层 prompt 拆成可直接进入 multi-similar 分组的类别规格。"""
+    normalized_prompt = _normalize_prompt_label(str(prompt_text or ""))
+    if not normalized_prompt:
+        return []
+
+    specs: List[Dict[str, Any]] = []
+    for one_class in split_prompt_classes(normalized_prompt):
+        translated = translate_to_english(one_class)
+        translated = translated.strip() if translated else one_class
+        if not translated:
+            translated = one_class
+        specs.append(
+            {
+                "category": one_class,
+                "text_prompt": [translated],
+                "prompt": one_class,
+                "translated_prompt": translated if translated != one_class else None,
+                "was_translated": translated != one_class,
+            }
+        )
+    return specs
+
+
 def _count_labels_by_category(labels: List[Dict[str, Any]]) -> Dict[str, int]:
     """统计每个原始类别的检测数量，用于 response.detection_details。"""
     counts: Dict[str, int] = {}
@@ -1247,8 +1271,8 @@ def _encode_reference_visual_prompt_from_boxes(
 def _run_sam3_query_grounding_with_visual_prompt_embeddings(
     query_image: Image.Image,
     query_features: Dict[str, Any],
-    visual_prompt_embed: torch.Tensor,
-    visual_prompt_mask: torch.Tensor,
+    visual_prompt_embed: Optional[torch.Tensor],
+    visual_prompt_mask: Optional[torch.Tensor],
     text_prompt: Optional[List[str]] = None,
     confidence_threshold: float = 0.0,
     max_candidates: Optional[int] = None,
@@ -1267,6 +1291,18 @@ def _run_sam3_query_grounding_with_visual_prompt_embeddings(
     query_backbone_out.update({key: value for key, value in predictor.model.text_embeddings.items()})
     text_features = query_backbone_out["language_features"][:, text_ids]
     text_masks = query_backbone_out["language_mask"][text_ids]
+    if visual_prompt_embed is None:
+        visual_prompt_embed = torch.zeros(
+            (0, text_features.shape[1], text_features.shape[2]),
+            device=text_features.device,
+            dtype=text_features.dtype,
+        )
+    if visual_prompt_mask is None:
+        visual_prompt_mask = torch.zeros(
+            (text_masks.shape[0], 0),
+            device=text_masks.device,
+            dtype=text_masks.dtype,
+        )
     prompt_embed = torch.cat([text_features, visual_prompt_embed], dim=0)
     prompt_mask = torch.cat([text_masks, visual_prompt_mask], dim=1)
 
@@ -1887,8 +1923,6 @@ def _prepare_multi_similar_reference_contexts(
         group_samples = grouped_samples[group_key]
         reference_contexts = _prepare_multi_reference_contexts_for_one_image(group_samples, top_k)
         sample_contexts.extend(reference_contexts)
-    if not any(sample_ctx.get("sample_type") != "negative" for sample_ctx in sample_contexts):
-        raise ValueError("At least one positive sample is required")
     return sample_contexts
 
 
@@ -2022,10 +2056,18 @@ def _resolve_multi_group_text_prompt(
     return None, original_prompt_joined, translated_prompt_joined, translated_prompt_joined != original_prompt_joined
 
 
-def _group_multi_sample_contexts_for_native_prompt(sample_contexts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _group_multi_sample_contexts_for_native_prompt(
+    sample_contexts: List[Dict[str, Any]],
+    prompt_text: Optional[str] = None,
+) -> List[Dict[str, Any]]:
     """按类别和正负样本分组，并按参考图片聚合 visual prompt 框。"""
     grouped: Dict[str, Dict[str, Any]] = {}
     ordered_groups: List[Dict[str, Any]] = []
+    prompt_specs = _prepare_prompt_group_specs(prompt_text)
+    prompt_specs_by_category = {
+        _normalize_prompt_label(spec["category"]).lower(): spec for spec in prompt_specs
+    }
+    finalized_categories = set()
 
     for sample_ctx in sample_contexts:
         category = sample_ctx["category"]
@@ -2076,11 +2118,21 @@ def _group_multi_sample_contexts_for_native_prompt(sample_contexts: List[Dict[st
 
     finalized_groups: List[Dict[str, Any]] = []
     for group in ordered_groups:
-        if not group["positive_sample_contexts"]:
+        prompt_source_contexts = group["positive_sample_contexts"] or group["sample_contexts"]
+        text_prompt, original_prompt, translated_prompt, was_translated = _resolve_multi_group_text_prompt(prompt_source_contexts)
+        if text_prompt is None and not group["positive_sample_contexts"]:
+            normalized_category = _normalize_prompt_label(group["category"]).lower()
+            prompt_spec = prompt_specs_by_category.get(normalized_category)
+            if prompt_spec is None and len(prompt_specs) == 1:
+                prompt_spec = prompt_specs[0]
+            if prompt_spec is not None:
+                text_prompt = prompt_spec["text_prompt"]
+                original_prompt = prompt_spec["prompt"]
+                translated_prompt = prompt_spec["translated_prompt"]
+                was_translated = prompt_spec["was_translated"]
+        if not group["positive_sample_contexts"] and text_prompt is None:
             continue
-        text_prompt, original_prompt, translated_prompt, was_translated = _resolve_multi_group_text_prompt(
-            group["positive_sample_contexts"]
-        )
+        finalized_categories.add(_normalize_prompt_label(group["category"]).lower())
         finalized_groups.append(
             {
                 "category": group["category"],
@@ -2100,7 +2152,42 @@ def _group_multi_sample_contexts_for_native_prompt(sample_contexts: List[Dict[st
                 "was_translated": was_translated,
             }
         )
+
+    for prompt_spec in prompt_specs:
+        normalized_category = _normalize_prompt_label(prompt_spec["category"]).lower()
+        if normalized_category in finalized_categories:
+            continue
+        finalized_groups.append(
+            {
+                "category": prompt_spec["category"],
+                "sample_contexts": [],
+                "negative_sample_contexts": [],
+                "sample_ids": [],
+                "source_image_ids": [],
+                "sample_id_display": "-",
+                "source_image_id_display": "-",
+                "source_groups": [],
+                "negative_sample_ids": [],
+                "negative_source_image_ids": [],
+                "negative_source_groups": [],
+                "text_prompt": prompt_spec["text_prompt"],
+                "prompt": prompt_spec["prompt"],
+                "translated_prompt": prompt_spec["translated_prompt"],
+                "was_translated": prompt_spec["was_translated"],
+            }
+        )
     return finalized_groups
+
+
+def _validate_multi_prompt_inputs(
+    sample_contexts: List[Dict[str, Any]],
+    grouped_prompts: List[Dict[str, Any]],
+) -> None:
+    """校验 multi-similar 至少有一个正样例或至少有一个文本 prompt group。"""
+    has_positive_sample = any(sample_ctx.get("sample_type") != "negative" for sample_ctx in sample_contexts)
+    has_text_prompt_group = any(group.get("text_prompt") for group in grouped_prompts)
+    if not has_positive_sample and not has_text_prompt_group:
+        raise ValueError("At least one positive sample or one prompt is required")
 
 
 def _collect_negative_visual_prompt_boxes(
@@ -2233,12 +2320,17 @@ def _is_suppressed_by_negative_sample(
     )
 
 
-def prepare_multi_visual_prompt_state(samples: List[Dict[str, Any]], top_k: int) -> Dict[str, Any]:
+def prepare_multi_visual_prompt_state(
+    samples: List[Dict[str, Any]],
+    top_k: int,
+    prompt_text: Optional[str] = None,
+) -> Dict[str, Any]:
     """Prepare reusable visual prompt embeddings for URL/task based sample annotation."""
     start_time = time.perf_counter()
     with _model_inference_context():
         sample_contexts = _prepare_multi_similar_reference_contexts(samples, top_k)
-        grouped_prompts = _group_multi_sample_contexts_for_native_prompt(sample_contexts)
+        grouped_prompts = _group_multi_sample_contexts_for_native_prompt(sample_contexts, prompt_text)
+        _validate_multi_prompt_inputs(sample_contexts, grouped_prompts)
         prepared_groups: List[Dict[str, Any]] = []
         total_reference_prompt_encode_ms = 0
         total_negative_reference_prompt_encode_ms = 0
@@ -2256,12 +2348,10 @@ def prepare_multi_visual_prompt_state(samples: List[Dict[str, Any]], top_k: int)
                 group_prompt_encode_ms += int(prompt_profile["reference_prompt_encode_ms"])
                 visual_prompt_embeds.append(prompt_embed)
                 visual_prompt_masks.append(prompt_mask)
-            if not visual_prompt_embeds:
-                continue
-
             prepared_group = dict(group)
-            prepared_group["visual_prompt_embed"] = torch.cat(visual_prompt_embeds, dim=0)
-            prepared_group["visual_prompt_mask"] = torch.cat(visual_prompt_masks, dim=1)
+            if visual_prompt_embeds:
+                prepared_group["visual_prompt_embed"] = torch.cat(visual_prompt_embeds, dim=0)
+                prepared_group["visual_prompt_mask"] = torch.cat(visual_prompt_masks, dim=1)
             prepared_group["reference_prompt_encode_ms"] = group_prompt_encode_ms
             total_reference_prompt_encode_ms += group_prompt_encode_ms
 
@@ -2329,11 +2419,13 @@ def _run_multi_native_visual_prompt_query(
     nms_iou: float,
     polygon_simplify_epsilon: float,
     pic_id: str,
+    prompt_text: Optional[str] = None,
 ) -> Dict[str, Any]:
     """multi-similar 核心查询：按类别合并多个 visual prompt，并应用负样本过滤。"""
     query_image = query_image.convert("RGB")
     query_start_time = time.perf_counter()
-    grouped_prompts = _group_multi_sample_contexts_for_native_prompt(sample_contexts)
+    grouped_prompts = _group_multi_sample_contexts_for_native_prompt(sample_contexts, prompt_text)
+    _validate_multi_prompt_inputs(sample_contexts, grouped_prompts)
     native_score_threshold = _native_visual_prompt_score_threshold(sam_threshold)
     max_visual_prompt_candidates = _multi_visual_prompt_candidate_limit(top_k, len(grouped_prompts))
 
@@ -2382,11 +2474,8 @@ def _run_multi_native_visual_prompt_query(
             group_prompt_encode_ms += int(prompt_profile["reference_prompt_encode_ms"])
             visual_prompt_embeds.append(prompt_embed)
             visual_prompt_masks.append(prompt_mask)
-        if not visual_prompt_embeds:
-            continue
-
-        merged_prompt_embed = torch.cat(visual_prompt_embeds, dim=0)
-        merged_prompt_mask = torch.cat(visual_prompt_masks, dim=1)
+        merged_prompt_embed = torch.cat(visual_prompt_embeds, dim=0) if visual_prompt_embeds else None
+        merged_prompt_mask = torch.cat(visual_prompt_masks, dim=1) if visual_prompt_masks else None
         arrays, group_profile = _run_sam3_query_grounding_with_visual_prompt_embeddings(
             query_image=query_image,
             query_features=query_features,
@@ -2645,8 +2734,8 @@ def run_multi_visual_prompt_query_with_state(
             arrays, group_profile = _run_sam3_query_grounding_with_visual_prompt_embeddings(
                 query_image=query_image,
                 query_features=query_features,
-                visual_prompt_embed=group["visual_prompt_embed"],
-                visual_prompt_mask=group["visual_prompt_mask"],
+                visual_prompt_embed=group.get("visual_prompt_embed"),
+                visual_prompt_mask=group.get("visual_prompt_mask"),
                 text_prompt=group["text_prompt"],
                 confidence_threshold=native_score_threshold,
                 max_candidates=max_visual_prompt_candidates,
@@ -2809,6 +2898,7 @@ def run_multi_similar_object_batch_pipeline(
     polygon_simplify_epsilon: float,
     pic_id: Optional[str] = None,
     query_names: Optional[List[str]] = None,
+    prompt_text: Optional[str] = None,
 ) -> Dict[str, Any]:
     """多类别、多参考样本、多查询图的 batch visual prompt 检测入口。"""
     if not query_images:
@@ -2830,6 +2920,7 @@ def run_multi_similar_object_batch_pipeline(
                 nms_iou,
                 polygon_simplify_epsilon,
                 query_pic_id,
+                prompt_text,
             )
             _attach_query_name(one_result, query_names, index)
             query_results.append(one_result)

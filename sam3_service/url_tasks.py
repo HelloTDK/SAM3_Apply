@@ -178,8 +178,6 @@ def parse_sample_manifest_text(text: str, download_url: str) -> List[Dict[str, A
 
     if not samples:
         raise ValueError("sample_url contains no valid sample marks")
-    if not any(item["sample_type"] != "negative" for item in samples):
-        raise ValueError("At least one positive sample is required")
     return samples
 
 
@@ -381,25 +379,30 @@ SAMPLE_STATE_CACHE = SampleStateCache()
 def build_sample_state(
     *,
     download_url: str,
-    sample_url: str,
+    sample_url: Optional[str],
     top_k: int,
+    prompt: Optional[str] = None,
     manifest_hash: Optional[str] = None,
     samples: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
-    if manifest_hash is None:
+    normalized_prompt = str(prompt or "").strip()
+    if sample_url and manifest_hash is None:
         parsed_samples, manifest_hash = load_sample_manifest(download_url, sample_url)
     else:
         parsed_samples = samples or []
+        manifest_hash = manifest_hash or ""
     cache_key = hashlib.sha256(
-        f"{download_url}|{sample_url}|{manifest_hash}|{top_k}".encode("utf-8")
+        f"{download_url}|{sample_url or ''}|{manifest_hash}|{top_k}|{normalized_prompt}".encode("utf-8")
     ).hexdigest()
     cached = SAMPLE_STATE_CACHE.get(cache_key)
     if cached is not None:
         cached["cache_hit"] = True
         return cached
-    if samples is None or not all("reference_image" in sample for sample in samples):
+    if sample_url and (samples is None or not all("reference_image" in sample for sample in samples)):
         samples = attach_sample_images(download_url, parsed_samples)
-    prompt_state = prepare_multi_visual_prompt_state(samples, top_k)
+    elif samples is None:
+        samples = parsed_samples
+    prompt_state = prepare_multi_visual_prompt_state(samples or [], top_k, prompt_text=normalized_prompt or None)
     prompt_state["cache_hit"] = False
     prompt_state["cache_key"] = cache_key
     SAMPLE_STATE_CACHE.set(cache_key, prompt_state)
@@ -409,7 +412,8 @@ def build_sample_state(
 def run_by_url_request(
     *,
     download_url: str,
-    sample_url: str,
+    sample_url: Optional[str],
+    prompt: Optional[str],
     query_image_url: str,
     pic_id: str,
     top_k: int,
@@ -419,13 +423,17 @@ def run_by_url_request(
     polygon_simplify_epsilon: float,
     return_result_image: bool,
 ) -> Dict[str, Any]:
-    parsed_samples, manifest_hash = load_sample_manifest(download_url, sample_url)
+    parsed_samples: List[Dict[str, Any]] = []
+    manifest_hash: Optional[str] = None
+    if sample_url:
+        parsed_samples, manifest_hash = load_sample_manifest(download_url, sample_url)
     sample_state = build_sample_state(
         download_url=download_url,
         sample_url=sample_url,
         top_k=top_k,
         manifest_hash=manifest_hash,
         samples=parsed_samples,
+        prompt=prompt,
     )
     query_image = download_image(download_url, query_image_url, timeout=60)
     return run_multi_visual_prompt_query_with_state(
@@ -597,13 +605,17 @@ class SimilarObjectTaskRegistry:
         request = task.request
         try:
             task.update(status="running", message="loading manifests")
-            parsed_samples, manifest_hash = load_sample_manifest(request.download_url, request.sample_url)
+            parsed_samples: List[Dict[str, Any]] = []
+            manifest_hash: Optional[str] = None
+            if request.sample_url:
+                parsed_samples, manifest_hash = load_sample_manifest(request.download_url, request.sample_url)
             sample_state = build_sample_state(
                 download_url=request.download_url,
                 sample_url=request.sample_url,
                 top_k=request.top_k,
                 manifest_hash=manifest_hash,
                 samples=parsed_samples,
+                prompt=getattr(request, "prompt", None),
             )
             if int(request.data_type) == 0:
                 query_items = load_query_items(request.download_url, request.data_url)

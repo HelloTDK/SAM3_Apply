@@ -157,7 +157,12 @@ class MultiSimilarSampleRequest(BaseModel):
 
 class MultiSimilarObjectRequest(BaseModel):
     pic_id: str = Field(..., min_length=1, max_length=128, description="Client image ID")
-    samples: List[MultiSimilarSampleRequest] = Field(..., min_length=1, max_length=20)
+    samples: List[MultiSimilarSampleRequest] = Field(default_factory=list, max_length=20)
+    prompt: Optional[str] = Field(
+        default=None,
+        max_length=512,
+        description="Optional top-level text prompt. Required when no positive sample is provided.",
+    )
     query_image_base64: Optional[str] = Field(
         default=None,
         description="Base64 query image string or data URL. Kept for single-image compatibility.",
@@ -190,13 +195,33 @@ class MultiSimilarObjectRequest(BaseModel):
             self.query_image_base64_list = [self.query_image_base64]
         elif len(self.query_image_base64_list) == 0:
             raise ValueError("query_image_base64_list must contain at least one image")
+        has_positive_sample = False
+        for sample in self.samples:
+            if sample.instances:
+                if any(instance.is_negative is not True and instance.sample_type != "negative" for instance in sample.instances):
+                    has_positive_sample = True
+                    break
+            elif sample.is_negative is not True and sample.sample_type != "negative":
+                has_positive_sample = True
+                break
+        if not has_positive_sample and not (self.prompt or "").strip():
+            raise ValueError("At least one positive sample or prompt is required")
         return self
 
 
 class SimilarObjectByUrlRequest(BaseModel):
     pic_id: str = Field(..., min_length=1, max_length=128, description="Client image ID")
     download_url: str = Field(..., min_length=1, description="Base URL used to download relative sample/query paths")
-    sample_url: str = Field(..., min_length=1, description="Remote sample manifest path or URL")
+    sample_url: Optional[str] = Field(
+        default=None,
+        min_length=1,
+        description="Remote sample manifest path or URL. Optional when prompt-only detection is used.",
+    )
+    prompt: Optional[str] = Field(
+        default=None,
+        max_length=512,
+        description="Optional top-level text prompt. Required when sample_url does not provide any positive sample.",
+    )
     query_image_url: str = Field(..., min_length=1, description="Remote query image path or URL")
     top_k: int = Field(default=5, ge=1, le=50, description="Max results kept per category after NMS")
     similarity_threshold: float = Field(default=0.6, ge=-1.0, le=1.0)
@@ -205,13 +230,28 @@ class SimilarObjectByUrlRequest(BaseModel):
     polygon_simplify_epsilon: float = Field(default=2.0, ge=0.0, le=50.0)
     return_result_image: bool = Field(default=False)
 
+    @model_validator(mode="after")
+    def validate_sample_or_prompt(self) -> "SimilarObjectByUrlRequest":
+        if not (self.sample_url or "").strip() and not (self.prompt or "").strip():
+            raise ValueError("Either sample_url or prompt is required")
+        return self
+
 
 class SimilarObjectTaskCreateRequest(BaseModel):
     task_id: str = Field(..., min_length=1, max_length=128)
     download_url: str = Field(..., min_length=1, description="Base URL used to download relative paths")
     data_type: int = Field(default=0, description="0=image list; non-zero values are treated as video list")
     data_url: str = Field(..., min_length=1, description="Remote image/video list manifest path or URL")
-    sample_url: str = Field(..., min_length=1, description="Remote sample manifest path or URL")
+    sample_url: Optional[str] = Field(
+        default=None,
+        min_length=1,
+        description="Remote sample manifest path or URL. Optional when prompt-only detection is used.",
+    )
+    prompt: Optional[str] = Field(
+        default=None,
+        max_length=512,
+        description="Optional top-level text prompt. Required when sample_url does not provide any positive sample.",
+    )
     infer_batch_size: int = Field(default=16, ge=1, le=64)
     frame_time: int = Field(default=1, ge=0, description="Video sampling interval in frames; 0 means every frame")
     top_k: int = Field(default=5, ge=1, le=50)
@@ -221,6 +261,12 @@ class SimilarObjectTaskCreateRequest(BaseModel):
     polygon_simplify_epsilon: float = Field(default=2.0, ge=0.0, le=50.0)
     return_result_image: bool = Field(default=False)
     result_ttl_seconds: int = Field(default=86400, ge=60, le=604800)
+
+    @model_validator(mode="after")
+    def validate_sample_or_prompt(self) -> "SimilarObjectTaskCreateRequest":
+        if not (self.sample_url or "").strip() and not (self.prompt or "").strip():
+            raise ValueError("Either sample_url or prompt is required")
+        return self
 
 
 class CreateApiKeyRequest(BaseModel):
