@@ -2120,7 +2120,7 @@ def _group_multi_sample_contexts_for_native_prompt(
     for group in ordered_groups:
         prompt_source_contexts = group["positive_sample_contexts"] or group["sample_contexts"]
         text_prompt, original_prompt, translated_prompt, was_translated = _resolve_multi_group_text_prompt(prompt_source_contexts)
-        if text_prompt is None and not group["positive_sample_contexts"]:
+        if text_prompt is None:
             normalized_category = _normalize_prompt_label(group["category"]).lower()
             prompt_spec = prompt_specs_by_category.get(normalized_category)
             if prompt_spec is None and len(prompt_specs) == 1:
