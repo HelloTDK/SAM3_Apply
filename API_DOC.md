@@ -387,6 +387,11 @@ http://192.168.100.25:8006/results/result_20260521_101000_000003.jpg
 
 该模式会返回 `profile`，包含 reference prompt 编码、query grounding 和 NMS 后候选数量，便于排查慢请求。
 
+说明：
+
+- 当前 multi visual prompt 链路里，负样例会直接编码成 SAM3 底层 box prompt 的 negative label，并和正样例一起进入同一次 grounding。
+- 为兼容旧响应，`profile` 中仍保留 `negative_grounding_forward_ms`、`negative_filter_candidates`、`suppressed_by_negative_samples` 等字段；在底层 negative box label 模式下，这些字段通常为 `0`，不再表示单独的负样例二次检索流程。
+
 ### 3.4 URL 样例图单张标注
 
 用途：上层服务已经有远程图片路径，不希望把样例图和待标注图转成 Base64。该接口由 SAM3 服务直接下载 `sample_url` 和 `query_image_url`。如果没有正样例，也可以只传 `prompt` 走文本识别；此时 `sample_url` 可省略。
@@ -730,6 +735,7 @@ Long polling 语义：
 - 最多支持 `300` 张样例图。
 - 最多支持 `2000` 个样例实例。
 - `sample_url` 可以全部是负样本；但此时请求级 `prompt` 必填。
+- `sample_type=0/negative` 的样例会直接映射为 SAM3 底层 negative box label，与正样例一起编码成 visual prompt，而不是单独走一条负样例检索再做 IoU 过滤。
 - `rotation` 当前接受但不参与计算；坐标仍按水平矩形 `[x,y,width,height]` 处理。
 - `mark_info` 推荐使用 object 或 object-string；为兼容旧数据，当前也支持 `[x, y, width, height]` 数组格式。
 - 样例图会按图片聚合，同一张样例图只提取一次特征。

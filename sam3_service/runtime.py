@@ -1125,13 +1125,27 @@ def _build_sam3_geometric_prompt_from_boxes(
     boxes_xywh: List[List[float]],
     image_width: int,
     image_height: int,
+    box_labels: Optional[List[int]] = None,
 ) -> Any:
     """把原图像素坐标里的 xywh 框转换成 SAM3 内部几何 prompt。"""
     xyxy_boxes = [
         bbox_xywh_to_xyxy(clip_bnd_points_to_image(one_box, image_width, image_height))
         for one_box in boxes_xywh
     ]
-    bboxes, labels = predictor._prepare_geometric_prompts((image_height, image_width), xyxy_boxes, None)
+    normalized_labels = None
+    if box_labels is not None:
+        if len(box_labels) != len(xyxy_boxes):
+            raise ValueError(
+                f"box_labels length {len(box_labels)} must match boxes length {len(xyxy_boxes)}"
+            )
+        normalized_labels = [int(one_label) for one_label in box_labels]
+        if any(one_label not in {0, 1} for one_label in normalized_labels):
+            raise ValueError("box_labels only supports 0 (negative) or 1 (positive)")
+    bboxes, labels = predictor._prepare_geometric_prompts(
+        (image_height, image_width),
+        xyxy_boxes,
+        normalized_labels,
+    )
     geometric_prompt = predictor._get_dummy_prompt(num_prompts=1)
     if bboxes is not None:
         for index in range(len(bboxes)):
@@ -1242,6 +1256,7 @@ def _encode_reference_visual_prompt_from_boxes(
     reference_image: Image.Image,
     reference_boxes_xywh: List[List[float]],
     reference_features: Optional[Dict[str, Any]] = None,
+    box_labels: Optional[List[int]] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, int]]:
     """把参考图上的一个或多个框编码成 SAM3 visual prompt token。"""
     reference_image = reference_image.convert("RGB")
@@ -1256,6 +1271,7 @@ def _encode_reference_visual_prompt_from_boxes(
         reference_boxes_xywh,
         reference_image.width,
         reference_image.height,
+        box_labels=box_labels,
     )
     reference_visual_prompt_embed, reference_visual_prompt_mask = predictor.model._encode_prompt(
         reference_img_feats,
@@ -1265,6 +1281,51 @@ def _encode_reference_visual_prompt_from_boxes(
     )
     return reference_visual_prompt_embed, reference_visual_prompt_mask, {
         "reference_prompt_encode_ms": _elapsed_ms(encode_start)
+    }
+
+
+def _build_group_visual_prompt_embeddings(
+    group: Dict[str, Any],
+) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor], Dict[str, int]]:
+    """把同一类别的正负样例统一编码成一组底层 visual prompt token。"""
+    visual_prompt_embeds: List[torch.Tensor] = []
+    visual_prompt_masks: List[torch.Tensor] = []
+    positive_prompt_encode_ms = 0
+    negative_prompt_encode_ms = 0
+
+    for source_group in group.get("source_groups") or []:
+        reference_boxes = source_group.get("reference_boxes") or []
+        if not reference_boxes:
+            continue
+        prompt_embed, prompt_mask, prompt_profile = _encode_reference_visual_prompt_from_boxes(
+            source_group["reference_image"],
+            reference_boxes,
+            source_group.get("reference_features"),
+            box_labels=[1] * len(reference_boxes),
+        )
+        positive_prompt_encode_ms += int(prompt_profile["reference_prompt_encode_ms"])
+        visual_prompt_embeds.append(prompt_embed)
+        visual_prompt_masks.append(prompt_mask)
+
+    for source_group in group.get("negative_source_groups") or []:
+        reference_boxes = source_group.get("reference_boxes") or []
+        if not reference_boxes:
+            continue
+        prompt_embed, prompt_mask, prompt_profile = _encode_reference_visual_prompt_from_boxes(
+            source_group["reference_image"],
+            reference_boxes,
+            source_group.get("reference_features"),
+            box_labels=[0] * len(reference_boxes),
+        )
+        negative_prompt_encode_ms += int(prompt_profile["reference_prompt_encode_ms"])
+        visual_prompt_embeds.append(prompt_embed)
+        visual_prompt_masks.append(prompt_mask)
+
+    merged_prompt_embed = torch.cat(visual_prompt_embeds, dim=0) if visual_prompt_embeds else None
+    merged_prompt_mask = torch.cat(visual_prompt_masks, dim=1) if visual_prompt_masks else None
+    return merged_prompt_embed, merged_prompt_mask, {
+        "reference_prompt_encode_ms": positive_prompt_encode_ms,
+        "negative_reference_prompt_encode_ms": negative_prompt_encode_ms,
     }
 
 
@@ -2190,136 +2251,6 @@ def _validate_multi_prompt_inputs(
         raise ValueError("At least one positive sample or one prompt is required")
 
 
-def _collect_negative_visual_prompt_boxes(
-    group: Dict[str, Any],
-    query_image: Image.Image,
-    query_features: Dict[str, Any],
-    native_score_threshold: float,
-    max_visual_prompt_candidates: int,
-) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
-    """用负样本 visual prompt 找出需要从正样本结果中抑制的区域。"""
-    negative_source_groups = group.get("negative_source_groups") or []
-    profile = {
-        "negative_reference_prompt_encode_ms": 0,
-        "negative_grounding_forward_ms": 0,
-        "negative_raw_candidates": 0,
-        "negative_post_nms_candidates": 0,
-        "negative_filter_candidates": 0,
-    }
-    if not negative_source_groups:
-        return [], profile
-
-    visual_prompt_embeds: List[torch.Tensor] = []
-    visual_prompt_masks: List[torch.Tensor] = []
-    for source_group in negative_source_groups:
-        prompt_embed, prompt_mask, prompt_profile = _encode_reference_visual_prompt_from_boxes(
-            source_group["reference_image"],
-            source_group["reference_boxes"],
-            source_group.get("reference_features"),
-        )
-        profile["negative_reference_prompt_encode_ms"] += int(prompt_profile["reference_prompt_encode_ms"])
-        visual_prompt_embeds.append(prompt_embed)
-        visual_prompt_masks.append(prompt_mask)
-
-    if not visual_prompt_embeds:
-        return [], profile
-
-    merged_prompt_embed = torch.cat(visual_prompt_embeds, dim=0)
-    merged_prompt_mask = torch.cat(visual_prompt_masks, dim=1)
-    arrays, negative_profile = _run_sam3_query_grounding_with_visual_prompt_embeddings(
-        query_image=query_image,
-        query_features=query_features,
-        visual_prompt_embed=merged_prompt_embed,
-        visual_prompt_mask=merged_prompt_mask,
-        text_prompt=group.get("text_prompt"),
-        confidence_threshold=native_score_threshold,
-        max_candidates=max_visual_prompt_candidates,
-    )
-    profile["negative_grounding_forward_ms"] += int(negative_profile["grounding_forward_ms"])
-    profile["negative_raw_candidates"] += int(negative_profile["raw_candidate_count"])
-    profile["negative_post_nms_candidates"] += int(negative_profile["kept_candidate_count"])
-
-    negative_records: List[Dict[str, Any]] = []
-    for candidate in _iter_primary_mask_candidates(
-        arrays,
-        query_image,
-        score_threshold=native_score_threshold,
-    ):
-        negative_records.append(
-            {
-                "bnd_points": candidate["bnd_points"],
-                "box_xyxy": candidate["box_xyxy"],
-                "score": max(0.0, min(1.0, candidate["score"])),
-            }
-        )
-
-    profile["negative_filter_candidates"] = len(negative_records)
-    return negative_records, profile
-
-
-def _collect_negative_visual_prompt_boxes_from_group_state(
-    group: Dict[str, Any],
-    query_image: Image.Image,
-    query_features: Dict[str, Any],
-    native_score_threshold: float,
-    max_visual_prompt_candidates: int,
-) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
-    """Use pre-encoded negative visual prompts for one query image."""
-    profile = {
-        "negative_reference_prompt_encode_ms": 0,
-        "negative_grounding_forward_ms": 0,
-        "negative_raw_candidates": 0,
-        "negative_post_nms_candidates": 0,
-        "negative_filter_candidates": 0,
-    }
-    visual_prompt_embed = group.get("negative_visual_prompt_embed")
-    visual_prompt_mask = group.get("negative_visual_prompt_mask")
-    if visual_prompt_embed is None or visual_prompt_mask is None:
-        return [], profile
-
-    arrays, negative_profile = _run_sam3_query_grounding_with_visual_prompt_embeddings(
-        query_image=query_image,
-        query_features=query_features,
-        visual_prompt_embed=visual_prompt_embed,
-        visual_prompt_mask=visual_prompt_mask,
-        text_prompt=group.get("text_prompt"),
-        confidence_threshold=native_score_threshold,
-        max_candidates=max_visual_prompt_candidates,
-    )
-    profile["negative_grounding_forward_ms"] += int(negative_profile["grounding_forward_ms"])
-    profile["negative_raw_candidates"] += int(negative_profile["raw_candidate_count"])
-    profile["negative_post_nms_candidates"] += int(negative_profile["kept_candidate_count"])
-
-    negative_records: List[Dict[str, Any]] = []
-    for candidate in _iter_primary_mask_candidates(
-        arrays,
-        query_image,
-        score_threshold=native_score_threshold,
-    ):
-        negative_records.append(
-            {
-                "bnd_points": candidate["bnd_points"],
-                "box_xyxy": candidate["box_xyxy"],
-                "score": max(0.0, min(1.0, candidate["score"])),
-            }
-        )
-
-    profile["negative_filter_candidates"] = len(negative_records)
-    return negative_records, profile
-
-
-def _is_suppressed_by_negative_sample(
-    candidate_bnd_points: List[float],
-    negative_records: List[Dict[str, Any]],
-    iou_threshold: float,
-) -> bool:
-    """判断候选框是否和负样本区域重叠过高，需要过滤。"""
-    return any(
-        bbox_iou_xywh(candidate_bnd_points, negative_record["bnd_points"]) >= iou_threshold
-        for negative_record in negative_records
-    )
-
-
 def prepare_multi_visual_prompt_state(
     samples: List[Dict[str, Any]],
     top_k: int,
@@ -2336,42 +2267,17 @@ def prepare_multi_visual_prompt_state(
         total_negative_reference_prompt_encode_ms = 0
 
         for group in grouped_prompts:
-            visual_prompt_embeds: List[torch.Tensor] = []
-            visual_prompt_masks: List[torch.Tensor] = []
-            group_prompt_encode_ms = 0
-            for source_group in group["source_groups"]:
-                prompt_embed, prompt_mask, prompt_profile = _encode_reference_visual_prompt_from_boxes(
-                    source_group["reference_image"],
-                    source_group["reference_boxes"],
-                    source_group.get("reference_features"),
-                )
-                group_prompt_encode_ms += int(prompt_profile["reference_prompt_encode_ms"])
-                visual_prompt_embeds.append(prompt_embed)
-                visual_prompt_masks.append(prompt_mask)
             prepared_group = dict(group)
-            if visual_prompt_embeds:
-                prepared_group["visual_prompt_embed"] = torch.cat(visual_prompt_embeds, dim=0)
-                prepared_group["visual_prompt_mask"] = torch.cat(visual_prompt_masks, dim=1)
-            prepared_group["reference_prompt_encode_ms"] = group_prompt_encode_ms
-            total_reference_prompt_encode_ms += group_prompt_encode_ms
-
-            negative_prompt_embeds: List[torch.Tensor] = []
-            negative_prompt_masks: List[torch.Tensor] = []
-            negative_prompt_encode_ms = 0
-            for source_group in group.get("negative_source_groups") or []:
-                prompt_embed, prompt_mask, prompt_profile = _encode_reference_visual_prompt_from_boxes(
-                    source_group["reference_image"],
-                    source_group["reference_boxes"],
-                    source_group.get("reference_features"),
-                )
-                negative_prompt_encode_ms += int(prompt_profile["reference_prompt_encode_ms"])
-                negative_prompt_embeds.append(prompt_embed)
-                negative_prompt_masks.append(prompt_mask)
-            if negative_prompt_embeds:
-                prepared_group["negative_visual_prompt_embed"] = torch.cat(negative_prompt_embeds, dim=0)
-                prepared_group["negative_visual_prompt_mask"] = torch.cat(negative_prompt_masks, dim=1)
-            prepared_group["negative_reference_prompt_encode_ms"] = negative_prompt_encode_ms
-            total_negative_reference_prompt_encode_ms += negative_prompt_encode_ms
+            merged_prompt_embed, merged_prompt_mask, prompt_profile = _build_group_visual_prompt_embeddings(group)
+            if merged_prompt_embed is not None:
+                prepared_group["visual_prompt_embed"] = merged_prompt_embed
+                prepared_group["visual_prompt_mask"] = merged_prompt_mask
+            prepared_group["reference_prompt_encode_ms"] = int(prompt_profile["reference_prompt_encode_ms"])
+            prepared_group["negative_reference_prompt_encode_ms"] = int(
+                prompt_profile["negative_reference_prompt_encode_ms"]
+            )
+            total_reference_prompt_encode_ms += int(prompt_profile["reference_prompt_encode_ms"])
+            total_negative_reference_prompt_encode_ms += int(prompt_profile["negative_reference_prompt_encode_ms"])
             prepared_groups.append(prepared_group)
 
     positive_sample_count = sum(1 for sample_ctx in sample_contexts if sample_ctx.get("sample_type") != "negative")
@@ -2421,7 +2327,7 @@ def _run_multi_native_visual_prompt_query(
     pic_id: str,
     prompt_text: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """multi-similar 核心查询：按类别合并多个 visual prompt，并应用负样本过滤。"""
+    """multi-similar 核心查询：按类别合并正负 visual prompt，一次性走底层 grounding。"""
     query_image = query_image.convert("RGB")
     query_start_time = time.perf_counter()
     grouped_prompts = _group_multi_sample_contexts_for_native_prompt(sample_contexts, prompt_text)
@@ -2448,34 +2354,11 @@ def _run_multi_native_visual_prompt_query(
     group_profiles: List[Dict[str, Any]] = []
 
     for group in grouped_prompts:
-        negative_records, negative_profile = _collect_negative_visual_prompt_boxes(
-            group,
-            query_image,
-            query_features,
-            native_score_threshold,
-            max_visual_prompt_candidates,
-        )
-        total_negative_reference_prompt_encode_ms += int(negative_profile["negative_reference_prompt_encode_ms"])
-        total_negative_grounding_forward_ms += int(negative_profile["negative_grounding_forward_ms"])
-        total_negative_raw_candidate_count += int(negative_profile["negative_raw_candidates"])
-        total_negative_post_nms_candidate_count += int(negative_profile["negative_post_nms_candidates"])
-        total_negative_filter_candidate_count += int(negative_profile["negative_filter_candidates"])
-        suppressed_by_negative_count = 0
-
-        visual_prompt_embeds: List[torch.Tensor] = []
-        visual_prompt_masks: List[torch.Tensor] = []
-        group_prompt_encode_ms = 0
-        for source_group in group["source_groups"]:
-            prompt_embed, prompt_mask, prompt_profile = _encode_reference_visual_prompt_from_boxes(
-                source_group["reference_image"],
-                source_group["reference_boxes"],
-                source_group.get("reference_features"),
-            )
-            group_prompt_encode_ms += int(prompt_profile["reference_prompt_encode_ms"])
-            visual_prompt_embeds.append(prompt_embed)
-            visual_prompt_masks.append(prompt_mask)
-        merged_prompt_embed = torch.cat(visual_prompt_embeds, dim=0) if visual_prompt_embeds else None
-        merged_prompt_mask = torch.cat(visual_prompt_masks, dim=1) if visual_prompt_masks else None
+        merged_prompt_embed, merged_prompt_mask, prompt_profile = _build_group_visual_prompt_embeddings(group)
+        group_prompt_encode_ms = int(prompt_profile["reference_prompt_encode_ms"])
+        negative_prompt_encode_ms = int(prompt_profile["negative_reference_prompt_encode_ms"])
+        total_reference_prompt_encode_ms += group_prompt_encode_ms
+        total_negative_reference_prompt_encode_ms += negative_prompt_encode_ms
         arrays, group_profile = _run_sam3_query_grounding_with_visual_prompt_embeddings(
             query_image=query_image,
             query_features=query_features,
@@ -2489,7 +2372,6 @@ def _run_multi_native_visual_prompt_query(
 
         raw_candidate_count += int(group_profile["raw_candidate_count"])
         post_nms_candidate_count += int(group_profile["kept_candidate_count"])
-        total_reference_prompt_encode_ms += group_prompt_encode_ms
         total_grounding_forward_ms += int(group_profile["grounding_forward_ms"])
 
         for candidate in _iter_primary_mask_candidates(
@@ -2499,11 +2381,6 @@ def _run_multi_native_visual_prompt_query(
         ):
             one_box_xywh = candidate["bnd_points"]
             one_score = candidate["score"]
-            if _is_suppressed_by_negative_sample(one_box_xywh, negative_records, MULTI_NEGATIVE_FILTER_IOU):
-                suppressed_by_negative_count += 1
-                total_suppressed_by_negative_count += 1
-                continue
-
             primary_u8 = candidate["primary_mask"]
             label = {
                 "category": group["category"],
@@ -2539,12 +2416,12 @@ def _run_multi_native_visual_prompt_query(
                 "grounding_forward_ms": int(group_profile["grounding_forward_ms"]),
                 "raw_candidates": int(group_profile["raw_candidate_count"]),
                 "post_nms_candidates": int(group_profile["kept_candidate_count"]),
-                "negative_reference_prompt_encode_ms": int(negative_profile["negative_reference_prompt_encode_ms"]),
-                "negative_grounding_forward_ms": int(negative_profile["negative_grounding_forward_ms"]),
-                "negative_raw_candidates": int(negative_profile["negative_raw_candidates"]),
-                "negative_post_nms_candidates": int(negative_profile["negative_post_nms_candidates"]),
-                "negative_filter_candidates": int(negative_profile["negative_filter_candidates"]),
-                "suppressed_by_negative_samples": suppressed_by_negative_count,
+                "negative_reference_prompt_encode_ms": negative_prompt_encode_ms,
+                "negative_grounding_forward_ms": 0,
+                "negative_raw_candidates": 0,
+                "negative_post_nms_candidates": 0,
+                "negative_filter_candidates": 0,
+                "suppressed_by_negative_samples": 0,
                 "candidate_loop_ms": group_candidate_loop_ms,
                 "max_visual_prompt_candidates": max_visual_prompt_candidates,
             }
@@ -2718,19 +2595,6 @@ def run_multi_visual_prompt_query_with_state(
         set_query_ms = _elapsed_ms(set_query_start)
 
         for group in grouped_prompts:
-            negative_records, negative_profile = _collect_negative_visual_prompt_boxes_from_group_state(
-                group,
-                query_image,
-                query_features,
-                native_score_threshold,
-                max_visual_prompt_candidates,
-            )
-            total_negative_grounding_forward_ms += int(negative_profile["negative_grounding_forward_ms"])
-            total_negative_raw_candidate_count += int(negative_profile["negative_raw_candidates"])
-            total_negative_post_nms_candidate_count += int(negative_profile["negative_post_nms_candidates"])
-            total_negative_filter_candidate_count += int(negative_profile["negative_filter_candidates"])
-            suppressed_by_negative_count = 0
-
             arrays, group_profile = _run_sam3_query_grounding_with_visual_prompt_embeddings(
                 query_image=query_image,
                 query_features=query_features,
@@ -2752,11 +2616,6 @@ def run_multi_visual_prompt_query_with_state(
             ):
                 one_box_xywh = candidate["bnd_points"]
                 one_score = candidate["score"]
-                if _is_suppressed_by_negative_sample(one_box_xywh, negative_records, MULTI_NEGATIVE_FILTER_IOU):
-                    suppressed_by_negative_count += 1
-                    total_suppressed_by_negative_count += 1
-                    continue
-
                 primary_u8 = candidate["primary_mask"]
                 label = {
                     "category": group["category"],
@@ -2793,11 +2652,11 @@ def run_multi_visual_prompt_query_with_state(
                     "raw_candidates": int(group_profile["raw_candidate_count"]),
                     "post_nms_candidates": int(group_profile["kept_candidate_count"]),
                     "negative_reference_prompt_encode_ms": int(group.get("negative_reference_prompt_encode_ms", 0)),
-                    "negative_grounding_forward_ms": int(negative_profile["negative_grounding_forward_ms"]),
-                    "negative_raw_candidates": int(negative_profile["negative_raw_candidates"]),
-                    "negative_post_nms_candidates": int(negative_profile["negative_post_nms_candidates"]),
-                    "negative_filter_candidates": int(negative_profile["negative_filter_candidates"]),
-                    "suppressed_by_negative_samples": suppressed_by_negative_count,
+                    "negative_grounding_forward_ms": 0,
+                    "negative_raw_candidates": 0,
+                    "negative_post_nms_candidates": 0,
+                    "negative_filter_candidates": 0,
+                    "suppressed_by_negative_samples": 0,
                     "candidate_loop_ms": group_candidate_loop_ms,
                     "max_visual_prompt_candidates": max_visual_prompt_candidates,
                 }
