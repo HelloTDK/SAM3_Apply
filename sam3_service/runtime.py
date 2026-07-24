@@ -7,6 +7,7 @@
 import asyncio
 import contextlib
 import gc
+import logging
 import os
 import threading
 import time
@@ -51,6 +52,9 @@ from .image_utils import (
     to_numpy,
     visualize_results,
 )
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 def _resolve_infer_dtype(device_name: str, requested: str) -> torch.dtype:
@@ -517,7 +521,13 @@ def _extract_primary_component_mask(
     candidate_bnd_points: List[float],
     min_area_ratio: float = 0.0001,
 ) -> np.ndarray:
-    """从预测 mask 中挑一个主要连通域，减少一张 mask 粘连多个目标的问题。"""
+    """从预测 mask 中挑一个主要连通域，减少一张 mask 粘连多个目标的问题。
+
+    ``min_area_ratio`` 保留用于兼容已有调用方，但不能再作为整图面积的
+    硬过滤条件。对于高分辨率图片的小目标，框内目标的 mask 可能远小于
+    ``image_width * image_height * min_area_ratio``；此时应优先相信 box prompt
+    的空间约束，按框中心或框内重叠区域选择连通域。
+    """
     mask_np = np.asarray(mask_2d)
     if mask_np.ndim > 2:
         mask_np = np.squeeze(mask_np)
@@ -540,23 +550,46 @@ def _extract_primary_component_mask(
     cy = max(0, min(cy, h_img - 1))
     label_at_center = int(labels[cy, cx])
 
+    # 只要连通域有像素就先保留。这里不能按整张图的面积比例过滤，否则
+    # 1920x1080 图片上的小目标很容易在参考 mask 阶段被清空。
     candidate_labels: List[Tuple[int, int]] = []
-    total_pixels = max(1, h_img * w_img)
     for label_id in range(1, num_labels):
         area = int(stats[label_id, cv2.CC_STAT_AREA])
-        if area / total_pixels < min_area_ratio:
+        if area <= 0:
             continue
         candidate_labels.append((label_id, area))
 
     if not candidate_labels:
         return np.zeros_like(binary)
 
-    # 框中心所在连通域通常是用户/候选框真正指向的目标；如果中心不在
-    # 有效连通域里，再退回到面积最大的连通域。
-    if label_at_center > 0 and any(label_id == label_at_center for label_id, _ in candidate_labels):
+    # 框中心所在连通域通常是用户/候选框真正指向的目标。即使这个连通域
+    # 很小，也应优先保留。
+    if label_at_center > 0 and any(
+        label_id == label_at_center for label_id, _ in candidate_labels
+    ):
         chosen_label = label_at_center
-    else:
-        chosen_label = max(candidate_labels, key=lambda item: item[1])[0]
+        return (labels == chosen_label).astype(np.uint8)
+
+    # 中心没有落在 mask 中时，按候选框内的重叠像素数选择连通域，避免
+    # 直接选择整张图中最大的无关区域。
+    x1 = max(0, int(round(x)))
+    y1 = max(0, int(round(y)))
+    x2 = min(w_img, int(round(x + w)))
+    y2 = min(h_img, int(round(y + h)))
+    if x2 > x1 and y2 > y1:
+        roi_labels = labels[y1:y2, x1:x2]
+        overlap_labels, overlap_counts = np.unique(roi_labels, return_counts=True)
+        overlap_candidates = [
+            (int(label_id), int(count))
+            for label_id, count in zip(overlap_labels, overlap_counts)
+            if int(label_id) > 0 and int(count) > 0
+        ]
+        if overlap_candidates:
+            chosen_label = max(overlap_candidates, key=lambda item: item[1])[0]
+            return (labels == chosen_label).astype(np.uint8)
+
+    # 最后才退回到面积最大的连通域。
+    chosen_label = max(candidate_labels, key=lambda item: item[1])[0]
     return (labels == chosen_label).astype(np.uint8)
 
 
@@ -1435,6 +1468,10 @@ def _iter_primary_mask_candidates(
         one_mask = np.asarray(masks_np[index])
         one_box_xyxy = clip_xyxy_to_image(one_box_xyxy, image.width, image.height)
         one_box_xywh = bbox_to_xywh(np.asarray(one_box_xyxy))
+        candidate_box_area = max(
+            1.0,
+            float(one_box_xywh[2]) * float(one_box_xywh[3]),
+        )
         primary_u8 = _extract_primary_component_mask(one_mask, one_box_xywh)
         if primary_u8.size <= 1 or primary_u8.max() == 0:
             continue
@@ -1445,8 +1482,14 @@ def _iter_primary_mask_candidates(
             one_box_xywh = bbox_to_xywh(np.asarray(one_box_xyxy))
 
         primary_area = int(np.count_nonzero(primary_u8))
-        area_ratio = primary_area / max(1, image.width * image.height)
-        if area_ratio <= min_area_ratio:
+        # 面积过滤改为相对候选框，而不是相对整张图片。这样高分辨率
+        # 图片中的小目标不会因为固定整图比例而被全部过滤，同时仍能
+        # 清理过小的孤立噪点。
+        min_primary_area = max(
+            4,
+            min(64, int(round(candidate_box_area * 0.02))),
+        )
+        if primary_area < min_primary_area:
             continue
 
         yield {
@@ -1984,6 +2027,16 @@ def _prepare_multi_similar_reference_contexts(
         group_samples = grouped_samples[group_key]
         reference_contexts = _prepare_multi_reference_contexts_for_one_image(group_samples, top_k)
         sample_contexts.extend(reference_contexts)
+
+    if not sample_contexts:
+        raise ValueError("all reference samples are invalid after SAM postprocess")
+
+    if not any(
+        sample_ctx.get("sample_type") != "negative"
+        for sample_ctx in sample_contexts
+    ):
+        raise ValueError("no valid positive reference sample remains after SAM postprocess")
+
     return sample_contexts
 
 
@@ -2034,14 +2087,27 @@ def _prepare_multi_reference_contexts_for_one_image(
 
     reference_contexts: List[Dict[str, Any]] = []
     for index, sample in enumerate(samples):
-        reference_ctx = _build_similar_reference_context_from_arrays(
-            reference_image=reference_image,
-            reference_bnd_points=clipped_boxes[index],
-            arrays=arrays,
-            result_index=matched_result_indices[index],
-            reference_features=reference_features,
-            build_reference_result_image=False,
-        )
+        try:
+            reference_ctx = _build_similar_reference_context_from_arrays(
+                reference_image=reference_image,
+                reference_bnd_points=clipped_boxes[index],
+                arrays=arrays,
+                result_index=matched_result_indices[index],
+                reference_features=reference_features,
+                build_reference_result_image=False,
+            )
+        except ValueError as exc:
+            # 多样例任务中单个坏样例不应拖垮整组参考样例；后续会检查
+            # 是否至少保留了一个有效正样例。
+            LOGGER.warning(
+                "跳过无效 SAM 参考样例: sample_id=%s, source_image_id=%s, "
+                "reference_bnd_points=%s, error=%s",
+                sample.get("sample_id", ""),
+                sample.get("source_image_id", ""),
+                clipped_boxes[index],
+                str(exc),
+            )
+            continue
         text_prompt, original_prompt, translated_prompt, was_translated = prepare_single_text_prompt(sample.get("prompt"))
         reference_ctx.update(
             {
@@ -2061,6 +2127,7 @@ def _prepare_multi_reference_contexts_for_one_image(
             }
         )
         reference_contexts.append(reference_ctx)
+
     reference_result_image = _visualize_multi_reference_contexts(reference_image, reference_contexts)
     for reference_ctx in reference_contexts:
         reference_ctx["reference_result_image"] = reference_result_image
