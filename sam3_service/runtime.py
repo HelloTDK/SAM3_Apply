@@ -2253,12 +2253,18 @@ def _group_multi_sample_contexts_for_native_prompt(
     for group in ordered_groups:
         prompt_source_contexts = group["positive_sample_contexts"] or group["sample_contexts"]
         text_prompt, original_prompt, translated_prompt, was_translated = _resolve_multi_group_text_prompt(prompt_source_contexts)
+        applied_prompt_spec: Optional[Dict[str, Any]] = None
         if text_prompt is None:
             normalized_category = _normalize_prompt_label(group["category"]).lower()
             prompt_spec = prompt_specs_by_category.get(normalized_category)
             if prompt_spec is None and len(prompt_specs) == 1:
                 prompt_spec = prompt_specs[0]
             if prompt_spec is not None:
+                # A single top-level prompt is used as the text condition for this
+                # sample group. Mark it as consumed below so it is not also run as
+                # a prompt-only group when its original language differs from the
+                # sample manifest label (for example, "person" and "人").
+                applied_prompt_spec = prompt_spec
                 text_prompt = prompt_spec["text_prompt"]
                 original_prompt = prompt_spec["prompt"]
                 translated_prompt = prompt_spec["translated_prompt"]
@@ -2285,6 +2291,8 @@ def _group_multi_sample_contexts_for_native_prompt(
                 "was_translated": was_translated,
             }
         )
+        if applied_prompt_spec is not None:
+            finalized_categories.add(_normalize_prompt_label(applied_prompt_spec["category"]).lower())
 
     for prompt_spec in prompt_specs:
         normalized_category = _normalize_prompt_label(prompt_spec["category"]).lower()

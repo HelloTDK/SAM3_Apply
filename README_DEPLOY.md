@@ -179,7 +179,7 @@ cd /expdata/givap/research/sam3/deploy3.3
 - `POST/GET/DELETE /ui/api-keys`
 - `POST/GET/DELETE /v1/api-keys`
 
-文本分割继续支持中文 prompt，服务会通过本地 Argos 模型翻译成英文后传入 Ultralytics SAM3。
+文本分割继续支持中文 prompt，服务会通过本地 Argos 模型翻译成英文后传入 Ultralytics SAM3。样例识别中只有一个顶层 prompt 时，该 prompt 会复用到样例类别分组，不会因样例标签使用英文、prompt 使用中文而额外执行同语义检测。
 
 ## 关键环境变量
 
