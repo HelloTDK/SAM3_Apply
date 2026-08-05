@@ -435,7 +435,7 @@ Authorization: Bearer <api_key>
 | `top_k` | 否 | integer | 每个类别最多保留结果数，默认 `5`，范围 `1-50` |
 | `sam_threshold` | 否 | number | SAM3 grounding 分数阈值，默认 `0.6` |
 | `similarity_threshold` | 否 | number | 兼容字段；当前不执行余弦相似度过滤 |
-| `nms_iou` | 否 | number | 最终按类别 NMS 阈值，默认 `0.45` |
+| `nms_iou` | 否 | number | 同类别最终 NMS 阈值，默认 `0.45`；当较小框有至少 `90%` 被同类别较大框覆盖时，也会按重框抑制 |
 | `polygon_simplify_epsilon` | 否 | number | 多边形简化参数，默认 `2.0` |
 | `return_result_image` | 否 | boolean | 是否生成可视化结果图；批量场景建议保持 `false` |
 
@@ -535,7 +535,7 @@ Authorization: Bearer <api_key>
 | `top_k` | 否 | integer | 每个类别最多保留结果数，默认 `5` |
 | `sam_threshold` | 否 | number | SAM3 grounding 分数阈值，默认 `0.6` |
 | `similarity_threshold` | 否 | number | 兼容字段；当前不执行余弦相似度过滤 |
-| `nms_iou` | 否 | number | 最终按类别 NMS 阈值，默认 `0.45` |
+| `nms_iou` | 否 | number | 同类别最终 NMS 阈值，默认 `0.45`；当较小框有至少 `90%` 被同类别较大框覆盖时，也会按重框抑制 |
 | `polygon_simplify_epsilon` | 否 | number | 多边形简化参数，默认 `2.0` |
 | `return_result_image` | 否 | boolean | 是否生成可视化结果图；5000 张批量时建议 `false` |
 | `result_ttl_seconds` | 否 | integer | 完成/失败/取消后结果保留时间，默认 `86400` |

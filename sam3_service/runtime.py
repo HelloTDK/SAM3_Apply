@@ -40,6 +40,7 @@ from .config import (
 )
 from .image_utils import (
     bbox_iou_xywh,
+    bbox_overlap_over_smaller_area_xywh,
     bbox_to_xywh,
     bbox_xywh_to_polygon_points,
     bbox_xywh_to_xyxy,
@@ -1666,7 +1667,7 @@ def _nms_multi_similar_records(
     iou_threshold: float,
     top_k_per_category: int,
 ) -> List[Dict[str, Any]]:
-    """multi prompt 结果按类别分别做 NMS，并限制每类 top-k。"""
+    """multi prompt 结果按类别 NMS，并清理同类别的大框包含小框重框。"""
     grouped: Dict[str, List[Dict[str, Any]]] = {}
     for record in records:
         grouped.setdefault(record["label"]["category"], []).append(record)
@@ -1679,9 +1680,13 @@ def _nms_multi_similar_records(
             reverse=True,
         )
         kept_for_category: List[Dict[str, Any]] = []
+        containment_threshold = max(0.9, float(iou_threshold))
         for record in category_records:
             if any(
                 bbox_iou_xywh(existing["label"]["bnd_points"], record["label"]["bnd_points"]) > iou_threshold
+                or bbox_overlap_over_smaller_area_xywh(
+                    existing["label"]["bnd_points"], record["label"]["bnd_points"]
+                ) >= containment_threshold
                 for existing in kept_for_category
             ):
                 continue

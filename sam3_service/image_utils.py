@@ -202,6 +202,23 @@ def bbox_iou_xywh(box_a: List[float], box_b: List[float]) -> float:
     return float(inter_area / union_area)
 
 
+def bbox_overlap_over_smaller_area_xywh(box_a: List[float], box_b: List[float]) -> float:
+    """计算交集相对较小框面积的比例，用于识别大框包含小框的重框。"""
+    ax1, ay1, aw, ah = [float(v) for v in box_a]
+    bx1, by1, bw, bh = [float(v) for v in box_b]
+    ax2, ay2 = ax1 + aw, ay1 + ah
+    bx2, by2 = bx1 + bw, by1 + bh
+    inter_x1 = max(ax1, bx1)
+    inter_y1 = max(ay1, by1)
+    inter_x2 = min(ax2, bx2)
+    inter_y2 = min(ay2, by2)
+    inter_area = max(0.0, inter_x2 - inter_x1) * max(0.0, inter_y2 - inter_y1)
+    smaller_area = min(max(0.0, aw) * max(0.0, ah), max(0.0, bw) * max(0.0, bh))
+    if smaller_area <= 0:
+        return 0.0
+    return float(inter_area / smaller_area)
+
+
 def bbox_xywh_to_polygon_points(bnd_points: List[float]) -> List[List[float]]:
     x, y, w, h = bnd_points
     return [
