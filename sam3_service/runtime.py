@@ -31,6 +31,7 @@ from .config import (
     MAX_CONCURRENT_INFERENCES,
     MODEL_LABEL,
     MULTI_NEGATIVE_FILTER_IOU,
+    NMS_DEBUG,
     SERIALIZE_MODEL_ACCESS,
     SIMILAR_MODES,
     ULTRALYTICS_IMGSZ,
@@ -1711,19 +1712,46 @@ def _nms_multi_similar_records(
         )
         kept_for_category: List[Dict[str, Any]] = []
         containment_threshold = max(0.9, float(iou_threshold))
+        if NMS_DEBUG:
+            print(
+                "SAM3 final NMS input: "
+                f"category={category}, candidates={len(category_records)}, "
+                f"nms_iou={float(iou_threshold):.3f}, "
+                f"containment_threshold={containment_threshold:.3f}"
+            )
         for record in category_records:
-            if any(
-                bbox_iou_xywh(existing["label"]["bnd_points"], record["label"]["bnd_points"]) > iou_threshold
-                or bbox_overlap_over_smaller_area_xywh(
-                    existing["label"]["bnd_points"], record["label"]["bnd_points"]
-                ) >= containment_threshold
-                for existing in kept_for_category
-            ):
+            suppressed_by: Optional[Dict[str, Any]] = None
+            for existing in kept_for_category:
+                existing_box = existing["label"]["bnd_points"]
+                current_box = record["label"]["bnd_points"]
+                iou = bbox_iou_xywh(existing_box, current_box)
+                containment = bbox_overlap_over_smaller_area_xywh(existing_box, current_box)
+                if iou > iou_threshold or containment >= containment_threshold:
+                    suppressed_by = {
+                        "existing_box": existing_box,
+                        "iou": iou,
+                        "containment": containment,
+                    }
+                    break
+            if suppressed_by is not None:
+                if NMS_DEBUG:
+                    print(
+                        "SAM3 final NMS suppress: "
+                        f"category={category}, keep_box={suppressed_by['existing_box']}, "
+                        f"drop_box={record['label']['bnd_points']}, "
+                        f"iou={suppressed_by['iou']:.4f}, "
+                        f"containment={suppressed_by['containment']:.4f}"
+                    )
                 continue
             kept_for_category.append(record)
             if len(kept_for_category) >= top_k_per_category:
                 break
         kept_records.extend(kept_for_category)
+        if NMS_DEBUG:
+            print(
+                "SAM3 final NMS output: "
+                f"category={category}, kept={len(kept_for_category)}"
+            )
 
     kept_records.sort(key=lambda item: float(item["label"].get("combined_score", 0.0)), reverse=True)
     return kept_records
@@ -2548,6 +2576,11 @@ def _run_multi_native_visual_prompt_query(
         )
 
     kept_records = _nms_multi_similar_records(candidate_records, nms_iou, top_k)
+    if NMS_DEBUG:
+        print(
+            "SAM3 final NMS summary: "
+            f"pic_id={pic_id}, input={len(candidate_records)}, output={len(kept_records)}"
+        )
     for record in kept_records:
         label = record["label"]
         polygons = mask_to_polygons(record["mask"], epsilon=polygon_simplify_epsilon)
@@ -2783,6 +2816,11 @@ def run_multi_visual_prompt_query_with_state(
             )
 
     kept_records = _nms_multi_similar_records(candidate_records, nms_iou, top_k)
+    if NMS_DEBUG:
+        print(
+            "SAM3 final NMS summary: "
+            f"pic_id={pic_id}, input={len(candidate_records)}, output={len(kept_records)}"
+        )
     for record in kept_records:
         label = record["label"]
         polygons = mask_to_polygons(record["mask"], epsilon=polygon_simplify_epsilon)

@@ -179,7 +179,7 @@ cd /expdata/givap/research/sam3/deploy3.3
 - `POST/GET/DELETE /ui/api-keys`
 - `POST/GET/DELETE /v1/api-keys`
 
-文本分割继续支持中文 prompt，服务会通过本地 Argos 模型翻译成英文后传入 Ultralytics SAM3。样例识别中只有一个顶层 prompt 时，该 prompt 会复用到样例类别分组，不会因样例标签使用英文、prompt 使用中文而额外执行同语义检测。
+文本分割继续支持中文 prompt，服务会通过本地 Argos 模型翻译成英文后传入 Ultralytics SAM3。样例识别中，顶层 prompt 与样例类别同义时会复用到样例类别分组；类别不同时会保留独立的纯文本检测组。
 
 ## 关键环境变量
 
@@ -188,6 +188,7 @@ cd /expdata/givap/research/sam3/deploy3.3
 - `SAM3_INFER_DTYPE`：`bfloat16`、`float16`、`float32`
 - `SAM3_ULTRALYTICS_IMGSZ`：默认 `1036`（Ultralytics SAM3 stride 14 的倍数）
 - `SAM3_ULTRALYTICS_IOU`：默认 `0.7`
+- `SAM3_NMS_DEBUG=1`：仅用于排查样例标注重框，输出最终 NMS 的候选、抑制和保留明细；默认 `0`
 - `SAM3_ARGOS_MODEL_DIR`：默认 `./argos_models`
 - `ARGOS_PACKAGES_DIR`：默认 `./argos-packages`
 - `SAM3_ARGOS_AUTO_INSTALL=0`
