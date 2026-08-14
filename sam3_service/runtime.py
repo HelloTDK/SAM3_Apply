@@ -462,6 +462,36 @@ def _prepare_prompt_group_specs(prompt_text: Optional[str]) -> List[Dict[str, An
     return specs
 
 
+def _prompt_spec_matches_sample_category(
+    sample_category: str,
+    prompt_spec: Dict[str, Any],
+) -> bool:
+    """判断顶层文本类别是否与样例类别相同，兼容中英文名称。"""
+    normalized_sample_category = _normalize_prompt_label(sample_category).lower()
+    if not normalized_sample_category:
+        return False
+
+    # 同时比较原始类别、已翻译类别和实际传给模型的文本，避免 person/人员
+    # 这类同义中英文类别被误判为不同类别。
+    prompt_category_candidates = [
+        prompt_spec.get("category"),
+        prompt_spec.get("translated_prompt"),
+        *(prompt_spec.get("text_prompt") or []),
+    ]
+    normalized_prompt_categories = {
+        _normalize_prompt_label(str(candidate or "")).lower()
+        for candidate in prompt_category_candidates
+        if _normalize_prompt_label(str(candidate or ""))
+    }
+    if normalized_sample_category in normalized_prompt_categories:
+        return True
+
+    translated_sample_category = _normalize_prompt_label(
+        translate_to_english(normalized_sample_category)
+    ).lower()
+    return bool(translated_sample_category and translated_sample_category in normalized_prompt_categories)
+
+
 def _count_labels_by_category(labels: List[Dict[str, Any]]) -> Dict[str, int]:
     """统计每个原始类别的检测数量，用于 response.detection_details。"""
     counts: Dict[str, int] = {}
@@ -2257,13 +2287,23 @@ def _group_multi_sample_contexts_for_native_prompt(
         if text_prompt is None:
             normalized_category = _normalize_prompt_label(group["category"]).lower()
             prompt_spec = prompt_specs_by_category.get(normalized_category)
-            if prompt_spec is None and len(prompt_specs) == 1:
-                prompt_spec = prompt_specs[0]
-            if prompt_spec is not None:
-                # A single top-level prompt is used as the text condition for this
-                # sample group. Mark it as consumed below so it is not also run as
-                # a prompt-only group when its original language differs from the
-                # sample manifest label (for example, "person" and "人").
+            if prompt_spec is None:
+                # 样例类别和文字类别可能分别是英文/中文，例如 person 和“人员”。
+                # 此处按翻译后的语义补充匹配，维持同类别 prompt 的融合能力。
+                prompt_spec = next(
+                    (
+                        candidate
+                        for candidate in prompt_specs
+                        if _prompt_spec_matches_sample_category(group["category"], candidate)
+                    ),
+                    None,
+                )
+            if prompt_spec is not None and _prompt_spec_matches_sample_category(
+                group["category"],
+                prompt_spec,
+            ):
+                # 仅同类别的文字 prompt 才能与样例 visual prompt 融合。类别不同时
+                # 必须保留纯文本分组，确保“样例标注 + 文字标注”同时返回结果。
                 applied_prompt_spec = prompt_spec
                 text_prompt = prompt_spec["text_prompt"]
                 original_prompt = prompt_spec["prompt"]

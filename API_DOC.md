@@ -430,7 +430,7 @@ Authorization: Bearer <api_key>
 | `pic_id` | 是 | string | 客户端图片 ID |
 | `download_url` | 是 | string | 下载服务根地址。相对路径会拼接成 `{download_url}/{path}` |
 | `sample_url` | 否 | string | 样例标注文件路径或完整 HTTP URL；有正样例时使用 |
-| `prompt` | 否 | string | 顶层文本 prompt；当 `sample_url` 没有正样例或完全省略时必填，支持 `;` / `,` 分隔，中文会自动翻译。只有一个 prompt 时会作为样例类别的文本条件复用，不会再额外创建同语义的纯文本检测组。 |
+| `prompt` | 否 | string | 顶层文本 prompt；当 `sample_url` 没有正样例或完全省略时必填，支持 `;` / `,` 分隔，中文会自动翻译。与样例 `label_id` 同类别（兼容中英文名称）时，会融合为该样例类别的文本条件；类别不同时，会额外创建独立的纯文本检测组并与样例结果一起返回。 |
 | `query_image_url` | 是 | string | 待标注图片路径或完整 HTTP URL |
 | `top_k` | 否 | integer | 每个类别最多保留结果数，默认 `5`，范围 `1-50` |
 | `sam_threshold` | 否 | number | SAM3 grounding 分数阈值，默认 `0.6` |
@@ -529,7 +529,7 @@ Authorization: Bearer <api_key>
 | `data_type` | 否 | integer | `0` 表示图片清单；非 `0` 表示视频清单 |
 | `data_url` | 是 | string | 待标注图片/视频清单路径或完整 HTTP URL |
 | `sample_url` | 否 | string | 样例标注文件路径或完整 HTTP URL；有正样例时使用 |
-| `prompt` | 否 | string | 顶层文本 prompt；当 `sample_url` 没有正样例或完全省略时必填，支持 `;` / `,` 分隔，中文会自动翻译。只有一个 prompt 时会作为样例类别的文本条件复用，不会再额外创建同语义的纯文本检测组。 |
+| `prompt` | 否 | string | 顶层文本 prompt；当 `sample_url` 没有正样例或完全省略时必填，支持 `;` / `,` 分隔，中文会自动翻译。与样例 `label_id` 同类别（兼容中英文名称）时，会融合为该样例类别的文本条件；类别不同时，会额外创建独立的纯文本检测组并与样例结果一起返回。 |
 | `infer_batch_size` | 否 | integer | 预留分批参数，默认 `16`，范围 `1-64` |
 | `frame_time` | 否 | integer | 视频抽帧间隔，按帧数计；`0` 表示逐帧，默认 `1` |
 | `top_k` | 否 | integer | 每个类别最多保留结果数，默认 `5` |
