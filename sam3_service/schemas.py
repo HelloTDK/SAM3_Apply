@@ -1,4 +1,4 @@
-from typing import List, Literal, Optional, Union
+from typing import Dict, List, Literal, Optional, Union
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -163,6 +163,10 @@ class MultiSimilarObjectRequest(BaseModel):
         max_length=512,
         description="Optional top-level text prompt. Required when no positive sample is provided.",
     )
+    prompt_category_map: Optional[Dict[str, str]] = Field(
+        default=None,
+        description="业务类别到模型文字 prompt 的映射，用于与样例类别稳定融合。",
+    )
     query_image_base64: Optional[str] = Field(
         default=None,
         description="Base64 query image string or data URL. Kept for single-image compatibility.",
@@ -222,6 +226,10 @@ class SimilarObjectByUrlRequest(BaseModel):
         max_length=512,
         description="Optional top-level text prompt. Required when sample_url does not provide any positive sample.",
     )
+    prompt_category_map: Optional[Dict[str, str]] = Field(
+        default=None,
+        description="业务类别到模型文字 prompt 的映射，用于与 sample_url 的 label_id 稳定融合。",
+    )
     query_image_url: str = Field(..., min_length=1, description="Remote query image path or URL")
     top_k: int = Field(default=5, ge=1, le=50, description="Max results kept per category after NMS")
     similarity_threshold: float = Field(default=0.6, ge=-1.0, le=1.0)
@@ -251,6 +259,10 @@ class SimilarObjectTaskCreateRequest(BaseModel):
         default=None,
         max_length=512,
         description="Optional top-level text prompt. Required when sample_url does not provide any positive sample.",
+    )
+    prompt_category_map: Optional[Dict[str, str]] = Field(
+        default=None,
+        description="业务类别到模型文字 prompt 的映射，用于与 sample_url 的 label_id 稳定融合。",
     )
     infer_batch_size: int = Field(default=16, ge=1, le=64)
     frame_time: int = Field(default=1, ge=0, description="Video sampling interval in frames; 0 means every frame")

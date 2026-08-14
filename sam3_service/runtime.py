@@ -439,8 +439,42 @@ def _prepare_detection_classes(prompt: str) -> Tuple[List[Dict[str, Any]], str, 
     return classes_info, translated_prompt, translated_prompt != original_prompt
 
 
-def _prepare_prompt_group_specs(prompt_text: Optional[str]) -> List[Dict[str, Any]]:
+def _prepare_prompt_group_specs(
+    prompt_text: Optional[str],
+    prompt_category_map: Optional[Dict[str, str]] = None,
+) -> List[Dict[str, Any]]:
     """把顶层 prompt 拆成可直接进入 multi-similar 分组的类别规格。"""
+    if prompt_category_map:
+        specs: List[Dict[str, Any]] = []
+        for raw_category, raw_prompt in prompt_category_map.items():
+            category = _normalize_prompt_label(str(raw_category or ""))
+            original_prompt = _normalize_prompt_label(str(raw_prompt or ""))
+            if not category or not original_prompt:
+                continue
+
+            # 映射键是业务输出类别，映射值才是传给模型的文字条件。这样无需依赖
+            # 人/person 等翻译结果，也不会把同一类别拆成两个独立检测组。
+            translated_terms: List[str] = []
+            for one_prompt in split_prompt_classes(original_prompt):
+                translated = translate_to_english(one_prompt)
+                translated = translated.strip() if translated else one_prompt
+                if translated and translated not in translated_terms:
+                    translated_terms.append(translated)
+            if not translated_terms:
+                continue
+            translated_prompt = "; ".join(translated_terms)
+            specs.append(
+                {
+                    "category": category,
+                    "text_prompt": translated_terms,
+                    "prompt": original_prompt,
+                    "translated_prompt": translated_prompt if translated_prompt != original_prompt else None,
+                    "was_translated": translated_prompt != original_prompt,
+                }
+            )
+        if specs:
+            return specs
+
     normalized_prompt = _normalize_prompt_label(str(prompt_text or ""))
     if not normalized_prompt:
         return []
@@ -2250,11 +2284,12 @@ def _resolve_multi_group_text_prompt(
 def _group_multi_sample_contexts_for_native_prompt(
     sample_contexts: List[Dict[str, Any]],
     prompt_text: Optional[str] = None,
+    prompt_category_map: Optional[Dict[str, str]] = None,
 ) -> List[Dict[str, Any]]:
     """按类别和正负样本分组，并按参考图片聚合 visual prompt 框。"""
     grouped: Dict[str, Dict[str, Any]] = {}
     ordered_groups: List[Dict[str, Any]] = []
-    prompt_specs = _prepare_prompt_group_specs(prompt_text)
+    prompt_specs = _prepare_prompt_group_specs(prompt_text, prompt_category_map)
     prompt_specs_by_category = {
         _normalize_prompt_label(spec["category"]).lower(): spec for spec in prompt_specs
     }
@@ -2403,12 +2438,17 @@ def prepare_multi_visual_prompt_state(
     samples: List[Dict[str, Any]],
     top_k: int,
     prompt_text: Optional[str] = None,
+    prompt_category_map: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     """Prepare reusable visual prompt embeddings for URL/task based sample annotation."""
     start_time = time.perf_counter()
     with _model_inference_context():
         sample_contexts = _prepare_multi_similar_reference_contexts(samples, top_k)
-        grouped_prompts = _group_multi_sample_contexts_for_native_prompt(sample_contexts, prompt_text)
+        grouped_prompts = _group_multi_sample_contexts_for_native_prompt(
+            sample_contexts,
+            prompt_text,
+            prompt_category_map,
+        )
         _validate_multi_prompt_inputs(sample_contexts, grouped_prompts)
         prepared_groups: List[Dict[str, Any]] = []
         total_reference_prompt_encode_ms = 0
@@ -2474,11 +2514,16 @@ def _run_multi_native_visual_prompt_query(
     polygon_simplify_epsilon: float,
     pic_id: str,
     prompt_text: Optional[str] = None,
+    prompt_category_map: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     """multi-similar 核心查询：按类别合并正负 visual prompt，一次性走底层 grounding。"""
     query_image = query_image.convert("RGB")
     query_start_time = time.perf_counter()
-    grouped_prompts = _group_multi_sample_contexts_for_native_prompt(sample_contexts, prompt_text)
+    grouped_prompts = _group_multi_sample_contexts_for_native_prompt(
+        sample_contexts,
+        prompt_text,
+        prompt_category_map,
+    )
     _validate_multi_prompt_inputs(sample_contexts, grouped_prompts)
     native_score_threshold = _native_visual_prompt_score_threshold(sam_threshold)
     max_visual_prompt_candidates = _multi_visual_prompt_candidate_limit(top_k, len(grouped_prompts))
@@ -2916,6 +2961,7 @@ def run_multi_similar_object_batch_pipeline(
     pic_id: Optional[str] = None,
     query_names: Optional[List[str]] = None,
     prompt_text: Optional[str] = None,
+    prompt_category_map: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     """多类别、多参考样本、多查询图的 batch visual prompt 检测入口。"""
     if not query_images:
@@ -2938,6 +2984,7 @@ def run_multi_similar_object_batch_pipeline(
                 polygon_simplify_epsilon,
                 query_pic_id,
                 prompt_text,
+                prompt_category_map,
             )
             _attach_query_name(one_result, query_names, index)
             query_results.append(one_result)

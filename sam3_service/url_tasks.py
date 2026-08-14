@@ -382,17 +382,26 @@ def build_sample_state(
     sample_url: Optional[str],
     top_k: int,
     prompt: Optional[str] = None,
+    prompt_category_map: Optional[Dict[str, str]] = None,
     manifest_hash: Optional[str] = None,
     samples: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     normalized_prompt = str(prompt or "").strip()
+    normalized_prompt_category_map = {
+        str(category or "").strip(): str(model_prompt or "").strip()
+        for category, model_prompt in (prompt_category_map or {}).items()
+        if str(category or "").strip() and str(model_prompt or "").strip()
+    }
     if sample_url and manifest_hash is None:
         parsed_samples, manifest_hash = load_sample_manifest(download_url, sample_url)
     else:
         parsed_samples = samples or []
         manifest_hash = manifest_hash or ""
     cache_key = hashlib.sha256(
-        f"{download_url}|{sample_url or ''}|{manifest_hash}|{top_k}|{normalized_prompt}".encode("utf-8")
+        (
+            f"{download_url}|{sample_url or ''}|{manifest_hash}|{top_k}|{normalized_prompt}|"
+            f"{json.dumps(normalized_prompt_category_map, ensure_ascii=True, sort_keys=True)}"
+        ).encode("utf-8")
     ).hexdigest()
     cached = SAMPLE_STATE_CACHE.get(cache_key)
     if cached is not None:
@@ -402,7 +411,12 @@ def build_sample_state(
         samples = attach_sample_images(download_url, parsed_samples)
     elif samples is None:
         samples = parsed_samples
-    prompt_state = prepare_multi_visual_prompt_state(samples or [], top_k, prompt_text=normalized_prompt or None)
+    prompt_state = prepare_multi_visual_prompt_state(
+        samples or [],
+        top_k,
+        prompt_text=normalized_prompt or None,
+        prompt_category_map=normalized_prompt_category_map or None,
+    )
     prompt_state["cache_hit"] = False
     prompt_state["cache_key"] = cache_key
     SAMPLE_STATE_CACHE.set(cache_key, prompt_state)
@@ -414,6 +428,7 @@ def run_by_url_request(
     download_url: str,
     sample_url: Optional[str],
     prompt: Optional[str],
+    prompt_category_map: Optional[Dict[str, str]],
     query_image_url: str,
     pic_id: str,
     top_k: int,
@@ -434,6 +449,7 @@ def run_by_url_request(
         manifest_hash=manifest_hash,
         samples=parsed_samples,
         prompt=prompt,
+        prompt_category_map=prompt_category_map,
     )
     query_image = download_image(download_url, query_image_url, timeout=60)
     return run_multi_visual_prompt_query_with_state(
@@ -616,6 +632,7 @@ class SimilarObjectTaskRegistry:
                 manifest_hash=manifest_hash,
                 samples=parsed_samples,
                 prompt=getattr(request, "prompt", None),
+                prompt_category_map=getattr(request, "prompt_category_map", None),
             )
             if int(request.data_type) == 0:
                 query_items = load_query_items(request.download_url, request.data_url)

@@ -372,6 +372,7 @@ def register_routes(app: FastAPI) -> None:
                     payload.pic_id,
                     None,
                     payload.prompt,
+                    payload.prompt_category_map,
                 )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -395,6 +396,7 @@ def register_routes(app: FastAPI) -> None:
                         download_url=payload.download_url,
                         sample_url=payload.sample_url,
                         prompt=payload.prompt,
+                        prompt_category_map=payload.prompt_category_map,
                         query_image_url=payload.query_image_url,
                         pic_id=payload.pic_id,
                         top_k=payload.top_k,

@@ -413,6 +413,7 @@ Authorization: Bearer <api_key>
   "download_url": "http://192.168.100.118:8092",
   "sample_url": "/group1/default/path/sample.txt",
   "prompt": "人; 安全帽",
+  "prompt_category_map": {"person": "人", "helmet": "安全帽"},
   "query_image_url": "/group1/default/path/image.jpg",
   "top_k": 5,
   "sam_threshold": 0.6,
@@ -431,6 +432,7 @@ Authorization: Bearer <api_key>
 | `download_url` | 是 | string | 下载服务根地址。相对路径会拼接成 `{download_url}/{path}` |
 | `sample_url` | 否 | string | 样例标注文件路径或完整 HTTP URL；有正样例时使用 |
 | `prompt` | 否 | string | 顶层文本 prompt；当 `sample_url` 没有正样例或完全省略时必填，支持 `;` / `,` 分隔，中文会自动翻译。与样例 `label_id` 同类别（兼容中英文名称）时，会融合为该样例类别的文本条件；类别不同时，会额外创建独立的纯文本检测组并与样例结果一起返回。 |
+| `prompt_category_map` | 否 | object | 业务类别到模型文字 prompt 的映射，例如 `{"person":"人"}`。样例模式推荐传入；服务端按键与 `label_id` 匹配，按值执行文字检测，避免翻译结果差异导致同一业务类别被拆成多个分组。 |
 | `query_image_url` | 是 | string | 待标注图片路径或完整 HTTP URL |
 | `top_k` | 否 | integer | 每个类别最多保留结果数，默认 `5`，范围 `1-50` |
 | `sam_threshold` | 否 | number | SAM3 grounding 分数阈值，默认 `0.6` |
@@ -508,6 +510,7 @@ Authorization: Bearer <api_key>
   "data_url": "/group1/default/path/images.txt",
   "sample_url": "/group1/default/path/sample.txt",
   "prompt": "人; 安全帽",
+  "prompt_category_map": {"person": "人", "helmet": "安全帽"},
   "infer_batch_size": 16,
   "frame_time": 25,
   "top_k": 5,
@@ -530,6 +533,7 @@ Authorization: Bearer <api_key>
 | `data_url` | 是 | string | 待标注图片/视频清单路径或完整 HTTP URL |
 | `sample_url` | 否 | string | 样例标注文件路径或完整 HTTP URL；有正样例时使用 |
 | `prompt` | 否 | string | 顶层文本 prompt；当 `sample_url` 没有正样例或完全省略时必填，支持 `;` / `,` 分隔，中文会自动翻译。与样例 `label_id` 同类别（兼容中英文名称）时，会融合为该样例类别的文本条件；类别不同时，会额外创建独立的纯文本检测组并与样例结果一起返回。 |
+| `prompt_category_map` | 否 | object | 业务类别到模型文字 prompt 的映射，例如 `{"person":"人"}`。样例模式推荐传入；服务端按键与 `label_id` 匹配，按值执行文字检测，避免翻译结果差异导致同一业务类别被拆成多个分组。 |
 | `infer_batch_size` | 否 | integer | 预留分批参数，默认 `16`，范围 `1-64` |
 | `frame_time` | 否 | integer | 视频抽帧间隔，按帧数计；`0` 表示逐帧，默认 `1` |
 | `top_k` | 否 | integer | 每个类别最多保留结果数，默认 `5` |
@@ -739,7 +743,7 @@ Long polling 语义：
 - `rotation` 当前接受但不参与计算；坐标仍按水平矩形 `[x,y,width,height]` 处理。
 - `mark_info` 推荐使用 object 或 object-string；为兼容旧数据，当前也支持 `[x, y, width, height]` 数组格式。
 - 样例图会按图片聚合，同一张样例图只提取一次特征。
-- 样例 prompt embedding 会缓存；相同 `download_url + sample_url + sample_url内容 + top_k` 命中缓存时，不重复下载样例图和编码样例 prompt。
+- 样例 prompt embedding 会缓存；相同 `download_url + sample_url + sample_url内容 + top_k + prompt_category_map` 命中缓存时，不重复下载样例图和编码样例 prompt。
 
 ### 3.7 `data_url` 文件格式
 
