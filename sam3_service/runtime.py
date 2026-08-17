@@ -1535,11 +1535,15 @@ def _build_group_visual_prompt_embeddings(
     visual_prompt_masks: List[torch.Tensor] = []
     positive_prompt_encode_ms = 0
     negative_prompt_encode_ms = 0
+    # 记录正负样例实际进入底层编码器的数量，避免只看请求参数造成误判。
+    positive_box_count = 0
+    negative_box_count = 0
 
     for source_group in group.get("source_groups") or []:
         reference_boxes = source_group.get("reference_boxes") or []
         if not reference_boxes:
             continue
+        positive_box_count += len(reference_boxes)
         prompt_embed, prompt_mask, prompt_profile = _encode_reference_visual_prompt_from_boxes(
             source_group["reference_image"],
             reference_boxes,
@@ -1554,6 +1558,7 @@ def _build_group_visual_prompt_embeddings(
         reference_boxes = source_group.get("reference_boxes") or []
         if not reference_boxes:
             continue
+        negative_box_count += len(reference_boxes)
         prompt_embed, prompt_mask, prompt_profile = _encode_reference_visual_prompt_from_boxes(
             source_group["reference_image"],
             reference_boxes,
@@ -1566,6 +1571,18 @@ def _build_group_visual_prompt_embeddings(
 
     merged_prompt_embed = torch.cat(visual_prompt_embeds, dim=0) if visual_prompt_embeds else None
     merged_prompt_mask = torch.cat(visual_prompt_masks, dim=1) if visual_prompt_masks else None
+    LOGGER.info(
+        "SAM3 prompt编码摘要: category=%s, text_prompt=%s, positive_boxes=%d, negative_boxes=%d, "
+        "visual_tokens=%s, visual_mask=%s, encode_ms=%d, negative_encode_ms=%d",
+        group.get("category"),
+        group.get("text_prompt"),
+        positive_box_count,
+        negative_box_count,
+        tuple(merged_prompt_embed.shape) if merged_prompt_embed is not None else None,
+        tuple(merged_prompt_mask.shape) if merged_prompt_mask is not None else None,
+        positive_prompt_encode_ms,
+        negative_prompt_encode_ms,
+    )
     return merged_prompt_embed, merged_prompt_mask, {
         "reference_prompt_encode_ms": positive_prompt_encode_ms,
         "negative_reference_prompt_encode_ms": negative_prompt_encode_ms,
@@ -1609,6 +1626,17 @@ def _run_sam3_query_grounding_with_visual_prompt_embeddings(
         )
     prompt_embed = torch.cat([text_features, visual_prompt_embed], dim=0)
     prompt_mask = torch.cat([text_masks, visual_prompt_mask], dim=1)
+    LOGGER.info(
+        "SAM3 grounding输入: text_prompt=%s, text_tokens=%s, visual_tokens=%s, combined_prompt=%s, "
+        "combined_mask=%s, score_threshold=%.4f, max_candidates=%s",
+        prompt_batch,
+        tuple(text_features.shape),
+        tuple(visual_prompt_embed.shape),
+        tuple(prompt_embed.shape),
+        tuple(prompt_mask.shape),
+        confidence_threshold,
+        max_candidates,
+    )
 
     encoder_out = predictor.model._run_encoder(
         query_img_feats,
@@ -1643,6 +1671,16 @@ def _run_sam3_query_grounding_with_visual_prompt_embeddings(
         query_image.width,
         confidence_threshold,
         max_candidates,
+    )
+    LOGGER.info(
+        "SAM3 grounding输出: text_prompt=%s, raw_candidates=%d, kept_candidates=%d, masks=%s, boxes=%s, scores=%s, forward_ms=%d",
+        prompt_batch,
+        raw_candidate_count,
+        kept_candidate_count,
+        tuple(arrays["masks"].shape),
+        tuple(arrays["boxes"].shape),
+        tuple(arrays["scores"].shape),
+        grounding_forward_ms,
     )
     return arrays, {
         "grounding_forward_ms": grounding_forward_ms,
@@ -2588,6 +2626,14 @@ def prepare_multi_visual_prompt_state(
     start_time = time.perf_counter()
     with _model_inference_context():
         sample_contexts = _prepare_multi_similar_reference_contexts(samples, top_k)
+        LOGGER.info(
+            "SAM3 multi样例准备: samples=%d, positive=%d, negative=%d, prompt=%s, top_k=%d",
+            len(samples),
+            sum(1 for item in sample_contexts if item.get("sample_type") != "negative"),
+            sum(1 for item in sample_contexts if item.get("sample_type") == "negative"),
+            prompt_text,
+            top_k,
+        )
         grouped_prompts = _group_multi_sample_contexts_for_native_prompt(
             sample_contexts,
             prompt_text,
@@ -2599,6 +2645,16 @@ def prepare_multi_visual_prompt_state(
         total_negative_reference_prompt_encode_ms = 0
 
         for group in grouped_prompts:
+            LOGGER.info(
+                "SAM3 multi分组: category=%s, text_prompt=%s, positive_samples=%d, negative_samples=%d, "
+                "positive_sources=%d, negative_sources=%d",
+                group.get("category"),
+                group.get("text_prompt"),
+                len(group.get("sample_contexts") or []),
+                len(group.get("negative_sample_contexts") or []),
+                len(group.get("source_groups") or []),
+                len(group.get("negative_source_groups") or []),
+            )
             prepared_group = dict(group)
             merged_prompt_embed, merged_prompt_mask, prompt_profile = _build_group_visual_prompt_embeddings(group)
             if merged_prompt_embed is not None:
@@ -2675,6 +2731,18 @@ def _run_multi_native_visual_prompt_query(
     _validate_multi_prompt_inputs(sample_contexts, grouped_prompts)
     native_score_threshold = _native_visual_prompt_score_threshold(sam_threshold)
     max_visual_prompt_candidates = _multi_visual_prompt_candidate_limit(top_k, len(grouped_prompts))
+    LOGGER.info(
+        "SAM3 multi查询开始: pic_id=%s, image_size=%sx%s, groups=%d, prompt=%s, "
+        "sam_threshold=%.4f, similarity_threshold=%.4f, max_candidates=%d",
+        pic_id,
+        query_image.width,
+        query_image.height,
+        len(grouped_prompts),
+        prompt_text,
+        sam_threshold,
+        similarity_threshold,
+        max_visual_prompt_candidates,
+    )
 
     set_query_start = time.perf_counter()
     query_features = set_ultralytics_image_features(query_image)
@@ -2710,6 +2778,15 @@ def _run_multi_native_visual_prompt_query(
             max_candidates=max_visual_prompt_candidates,
         )
         group_candidate_loop_start = time.perf_counter()
+        LOGGER.info(
+            "SAM3 multi分组输出: pic_id=%s, category=%s, raw=%d, post_nms=%d, positive=%d, negative=%d",
+            pic_id,
+            group.get("category"),
+            int(group_profile["raw_candidate_count"]),
+            int(group_profile["kept_candidate_count"]),
+            len(group.get("sample_contexts") or []),
+            len(group.get("negative_sample_contexts") or []),
+        )
 
         raw_candidate_count += int(group_profile["raw_candidate_count"])
         post_nms_candidate_count += int(group_profile["kept_candidate_count"])
@@ -2770,6 +2847,13 @@ def _run_multi_native_visual_prompt_query(
 
     kept_records = _nms_multi_similar_records(candidate_records, nms_iou, top_k)
     negative_embedding_records = _build_negative_embedding_records(sample_contexts)
+    LOGGER.info(
+        "SAM3 multi候选汇总: pic_id=%s, before_nms=%d, after_nms=%d, negative_records=%d",
+        pic_id,
+        len(candidate_records),
+        len(kept_records),
+        len(negative_embedding_records),
+    )
     total_negative_filter_candidate_count = len(kept_records) if negative_embedding_records else 0
     kept_records, total_suppressed_by_negative_count = _negative_cosine_filter_records(
         kept_records,
@@ -2778,6 +2862,14 @@ def _run_multi_native_visual_prompt_query(
         query_image,
         similarity_threshold,
         pic_id,
+    )
+    LOGGER.info(
+        "SAM3 multi负样例过滤: pic_id=%s, before=%d, after=%d, suppressed=%d, negative_records=%d",
+        pic_id,
+        len(kept_records) + total_suppressed_by_negative_count,
+        len(kept_records),
+        total_suppressed_by_negative_count,
+        len(negative_embedding_records),
     )
     if NMS_DEBUG:
         print(
@@ -2934,6 +3026,18 @@ def run_multi_visual_prompt_query_with_state(
 
     native_score_threshold = _native_visual_prompt_score_threshold(sam_threshold)
     max_visual_prompt_candidates = _multi_visual_prompt_candidate_limit(top_k, len(grouped_prompts))
+    # 缓存样例任务不会再次编码参考图，因此单独记录其查询侧的输入摘要。
+    LOGGER.info(
+        "SAM3 缓存multi查询开始: pic_id=%s, image_size=%sx%s, groups=%d, sam_threshold=%.4f, "
+        "similarity_threshold=%.4f, max_candidates=%d",
+        pic_id,
+        query_image.width,
+        query_image.height,
+        len(grouped_prompts),
+        sam_threshold,
+        similarity_threshold,
+        max_visual_prompt_candidates,
+    )
 
     candidate_records: List[Dict[str, Any]] = []
     raw_candidate_count = 0
@@ -2966,6 +3070,16 @@ def run_multi_visual_prompt_query_with_state(
             raw_candidate_count += int(group_profile["raw_candidate_count"])
             post_nms_candidate_count += int(group_profile["kept_candidate_count"])
             total_grounding_forward_ms += int(group_profile["grounding_forward_ms"])
+            LOGGER.info(
+                "SAM3 缓存multi分组输出: pic_id=%s, category=%s, raw=%d, post_nms=%d, "
+                "positive=%d, negative=%d",
+                pic_id,
+                group.get("category"),
+                int(group_profile["raw_candidate_count"]),
+                int(group_profile["kept_candidate_count"]),
+                len(group.get("sample_contexts") or []),
+                len(group.get("negative_sample_contexts") or []),
+            )
 
             for candidate in _iter_primary_mask_candidates(
                 arrays,
@@ -3022,6 +3136,13 @@ def run_multi_visual_prompt_query_with_state(
 
     kept_records = _nms_multi_similar_records(candidate_records, nms_iou, top_k)
     negative_embedding_records = prompt_state.get("negative_embedding_records") or []
+    LOGGER.info(
+        "SAM3 缓存multi候选汇总: pic_id=%s, before_nms=%d, after_nms=%d, negative_records=%d",
+        pic_id,
+        len(candidate_records),
+        len(kept_records),
+        len(negative_embedding_records),
+    )
     total_negative_filter_candidate_count = len(kept_records) if negative_embedding_records else 0
     kept_records, total_suppressed_by_negative_count = _negative_cosine_filter_records(
         kept_records,
@@ -3030,6 +3151,14 @@ def run_multi_visual_prompt_query_with_state(
         query_image,
         similarity_threshold,
         pic_id,
+    )
+    LOGGER.info(
+        "SAM3 缓存multi负样例过滤: pic_id=%s, before=%d, after=%d, suppressed=%d, negative_records=%d",
+        pic_id,
+        len(kept_records) + total_suppressed_by_negative_count,
+        len(kept_records),
+        total_suppressed_by_negative_count,
+        len(negative_embedding_records),
     )
     if NMS_DEBUG:
         print(
