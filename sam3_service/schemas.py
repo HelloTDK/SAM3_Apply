@@ -62,10 +62,10 @@ class SimilarObjectRequest(BaseModel):
     )
     top_k: int = Field(default=5, ge=1, le=20, description="Candidate boxes to verify in query image")
     similarity_threshold: float = Field(
-        default=0.6,
+        default=0.9,
         ge=-1.0,
         le=1.0,
-        description="兼容旧客户端的字段；当前 visual prompt 推理不使用余弦相似度过滤。",
+        description="统一默认阈值为 0.9；样例负例过滤时，候选框与任一负例的相似度大于该值会被过滤。",
     )
     sam_threshold: float = Field(
         default=0.6,

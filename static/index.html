@@ -981,6 +981,7 @@
         const similarSubmitBtn = document.getElementById('similarSubmitBtn');
         const similarSamThreshold = document.getElementById('similarSamThreshold');
         const similarSamThresholdValue = document.getElementById('similarSamThresholdValue');
+        // 负例余弦过滤阈值固定为 0.9，不能再被 SAM 置信度滑块覆盖。
         const similarityThresholdCompat = document.getElementById('similarityThresholdCompat');
         const loading = document.getElementById('loading');
         const error = document.getElementById('error');
@@ -2137,7 +2138,6 @@
         similarSamThreshold.addEventListener('input', function(e) {
             const value = parseFloat(e.target.value).toFixed(2);
             similarSamThresholdValue.textContent = value;
-            similarityThresholdCompat.value = value;
         });
 
         // Set example prompt

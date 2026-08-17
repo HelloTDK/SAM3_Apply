@@ -228,7 +228,7 @@ Base64 小请求使用 `POST /v1/similar-object-segmentations`，通过 `similar
   "prompt": "红色安全帽",
   "top_k": 5,
   "sam_threshold": 0.6,
-  "similarity_threshold": 0.6,
+  "similarity_threshold": 0.9,
   "polygon_simplify_epsilon": 2.0,
   "similar_mode": "feature_match"
 }
@@ -247,7 +247,7 @@ Base64 小请求使用 `POST /v1/similar-object-segmentations`，通过 `similar
   "reference_bnd_points": [120, 80, 260, 300],
   "top_k": 5,
   "sam_threshold": 0.6,
-  "similarity_threshold": 0.6,
+  "similarity_threshold": 0.9,
   "similar_mode": "feature_match"
 }
 ```
@@ -263,7 +263,7 @@ Base64 小请求使用 `POST /v1/similar-object-segmentations`，通过 `similar
 | `prompt` | 否 | string | 可选相似目标文本描述；拼接模式填写后会和示例框一起传给 SAM3，中文会自动翻译成英文 |
 | `top_k` | 否 | integer | 返回最多目标数，默认 `5`，范围 `1-20` |
 | `sam_threshold` | 否 | number | SAM3 grounding 分数阈值，默认 `0.6` |
-| `similarity_threshold` | 否 | number | 兼容旧客户端字段；当前不再执行余弦相似度过滤 |
+| `similarity_threshold` | 否 | number | 统一默认 `0.9`；样例负例过滤时，候选框与任一负例的相似度严格大于该值会被过滤 |
 | `polygon_simplify_epsilon` | 否 | number | 多边形简化参数，默认 `2.0` |
 | `similar_mode` | 否 | string | `feature_match`、`same_image_prompt` |
 
@@ -279,7 +279,7 @@ Base64 小请求使用 `POST /v1/similar-object-segmentations`，通过 `similar
   "reference_bnd_points": [120.0, 80.0, 260.0, 300.0],
   "top_k": 5,
   "sam_threshold": 0.6,
-  "similarity_threshold": 0.6,
+  "similarity_threshold": 0.9,
   "num_candidates": 12,
   "num_matches": 3,
   "pic_labels": [
@@ -329,7 +329,7 @@ http://192.168.100.25:8006/results/result_20260521_101000_000003.jpg
   "reference_bnd_points": [120, 80, 260, 300],
   "top_k": 5,
   "sam_threshold": 0.6,
-  "similarity_threshold": 0.6,
+  "similarity_threshold": 0.9,
   "polygon_simplify_epsilon": 2.0,
   "similar_mode": "same_image_prompt"
 }
@@ -380,7 +380,7 @@ http://192.168.100.25:8006/results/result_20260521_101000_000003.jpg
   "reference_bnd_points": [120, 80, 260, 300],
   "top_k": 5,
   "sam_threshold": 0.6,
-  "similarity_threshold": 0.6,
+  "similarity_threshold": 0.9,
   "similar_mode": "feature_match"
 }
 ```
@@ -830,7 +830,7 @@ curl -X POST 'http://192.168.100.25:8006/similar-detect' \
   -F 'reference_bnd_points=120,80,260,300' \
   -F 'top_k=5' \
   -F 'sam_threshold=0.6' \
-  -F 'similarity_threshold=0.6' \
+  -F 'similarity_threshold=0.9' \
   -F 'similar_mode=same_image_prompt'
 ```
 
@@ -846,7 +846,7 @@ curl -X POST 'http://192.168.100.25:8006/similar-detect' \
 | `prompt` | 否 | string | 顶层文本 prompt；当没有正样例时必填，支持 `;` / `,` 分隔，中文会自动翻译 |
 | `top_k` | 否 | integer | 默认 `5` |
 | `sam_threshold` | 否 | number | SAM3 grounding 分数阈值，默认 `0.6` |
-| `similarity_threshold` | 否 | number | 兼容旧客户端字段；当前不再执行余弦相似度过滤 |
+| `similarity_threshold` | 否 | number | 统一默认 `0.9`；样例负例过滤时，候选框与任一负例的相似度严格大于该值会被过滤 |
 | `polygon_simplify_epsilon` | 否 | number | 默认 `2.0` |
 | `pic_id` | 否 | string | 图片 ID |
 
