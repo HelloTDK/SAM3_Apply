@@ -12,5 +12,6 @@ if __name__ == "__main__":
     print("Starting SAM3 Detection Server...")
     print(f"Server URL: http://{host}:{port}")
     print(f"OpenAPI docs: http://{host}:{port}/docs")
+    print(f"SAM3 diagnostic log level: {os.getenv('SAM3_LOG_LEVEL', 'INFO')}")
 
     uvicorn.run(app, host=host, port=port)

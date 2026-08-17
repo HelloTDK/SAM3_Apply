@@ -57,6 +57,18 @@ from .image_utils import (
 
 
 LOGGER = logging.getLogger(__name__)
+# 诊断日志默认开启 INFO；可通过 SAM3_LOG_LEVEL=WARNING/ERROR 降低日志量。
+_SAM3_LOG_LEVEL_NAME = (os.getenv("SAM3_LOG_LEVEL", "INFO") or "INFO").strip().upper()
+LOGGER.setLevel(getattr(logging, _SAM3_LOG_LEVEL_NAME, logging.INFO))
+# Uvicorn 以外的启动方式可能没有配置 root handler，这里补一个 stderr handler，
+# 确保诊断日志不会因为缺少全局 logging 配置而完全丢失。
+if not LOGGER.handlers:
+    _sam3_handler = logging.StreamHandler()
+    _sam3_handler.setLevel(LOGGER.level)
+    _sam3_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    LOGGER.addHandler(_sam3_handler)
+LOGGER.propagate = True
+LOGGER.info("SAM3 runtime 诊断日志已启用: logger=%s, level=%s", LOGGER.name, _SAM3_LOG_LEVEL_NAME)
 
 
 def _resolve_infer_dtype(device_name: str, requested: str) -> torch.dtype:
