@@ -361,12 +361,19 @@ def _crop_backbone_embedding(
     image_width: int,
     image_height: int,
 ) -> Optional[torch.Tensor]:
-    """根据图像框从 SAM3 最深层特征图提取归一化向量，供负例余弦过滤使用。"""
+    """根据图像框从 SAM3 高分辨率特征图提取归一化向量，供负例余弦过滤使用。"""
     feature_maps = features.get("backbone_fpn") if isinstance(features, dict) else None
     if not isinstance(feature_maps, list) or not feature_maps:
         return None
-    feature_map = feature_maps[-1]
-    if not torch.is_tensor(feature_map) or feature_map.ndim != 4:
+    # 最深层特征图空间分辨率过低，小目标通常只落在一个网格点上，会让
+    # 不同目标得到几乎相同的向量并产生虚高余弦相似度。这里选择空间分辨率
+    # 最高的 backbone 层，尽量保留目标框内部的外观差异。
+    feature_map = max(
+        (one_map for one_map in feature_maps if torch.is_tensor(one_map) and one_map.ndim == 4),
+        key=lambda one_map: int(one_map.shape[-2]) * int(one_map.shape[-1]),
+        default=None,
+    )
+    if feature_map is None:
         return None
     _, _, map_height, map_width = feature_map.shape
     x, y, width, height = [float(value) for value in box_xywh]
