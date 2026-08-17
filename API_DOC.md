@@ -390,8 +390,9 @@ http://192.168.100.25:8006/results/result_20260521_101000_000003.jpg
 说明：
 
 - 当前 multi visual prompt 链路里，负样例会先编码成 SAM3 底层 box prompt 的 negative label，并和正样例一起进入同一次 grounding。
-- 目标框完成最终 NMS 后，服务会从 SAM3 空间分辨率最高的 backbone 特征图提取每个目标框和所有负例框的向量，计算余弦相似度；任一相似度严格大于 `similarity_threshold` 的目标框会被过滤。默认阈值为 `0.9`，没有负例时不会执行该过滤。
+- 目标框完成最终 NMS 后，服务会从 SAM3 空间分辨率最高的 backbone 特征图提取每个目标框和所有负例框的向量。向量优先按 SAM 分割掩码做加权池化，并移除图片级通道公共分量后计算余弦相似度；任一相似度严格大于 `similarity_threshold` 的目标框会被过滤。默认阈值为 `0.9`，没有负例时不会执行该过滤。
 - 每个保留的 `pic_labels` 项包含 `negative_similarity_score`（与所有负例的最大余弦相似度）。`profile.negative_filter_candidates`、`profile.suppressed_by_negative_samples`、`profile.negative_cosine_threshold` 可用于核验过滤数量和阈值。
+- 服务日志会为每个参与余弦过滤的候选输出图片 ID、目标框、SAM 分数、最大负例相似度、命中的负例 `sample_id` 和是否过滤，并在图片处理完成后输出汇总行。
 
 ### 3.4 URL 样例图单张标注
 
