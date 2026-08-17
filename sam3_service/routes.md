@@ -162,7 +162,7 @@ XSS防御：HTML页面渲染时全部字段使用`html.escape()`转义，防止�
 
 ## 5. 图像推理可调参数
 - confidence_threshold：检测置信度过滤
-- similarity_threshold：特征相似度阈值
+- similarity_threshold：负例余弦相似度过滤阈值；候选框与任一负例相似度大于该值时过滤，默认 `0.9`
 - sam_threshold：SAM掩码生成阈值
 - nms_iou：非极大抑制重叠阈值
 - polygon_simplify_epsilon：轮廓多边形简化系数，控制返回坐标点数

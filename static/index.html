@@ -877,7 +877,7 @@
                     </label>
                     <div class="slider-container">
                         <input type="range" id="similarSamThreshold" name="sam_threshold" min="0.0" max="1.0" step="0.01" value="0.60">
-                        <input type="hidden" id="similarityThresholdCompat" name="similarity_threshold" value="0.60">
+                        <input type="hidden" id="similarityThresholdCompat" name="similarity_threshold" value="0.90">
                     </div>
                     <p class="hint">用于过滤 SAM3 visual prompt 候选结果；数值越高，保留结果越严格。</p>
                 </div>
@@ -2401,7 +2401,7 @@
         function appendSharedNativePromptParams(formData) {
             formData.append('top_k', document.getElementById('similarTopK').value || '5');
             formData.append('sam_threshold', similarSamThreshold.value || '0.6');
-            formData.append('similarity_threshold', similarSamThreshold.value || '0.6');
+            formData.append('similarity_threshold', similarityThresholdCompat.value || '0.9');
             formData.append('nms_iou', '0.45');
             formData.append('polygon_simplify_epsilon', '2.0');
         }

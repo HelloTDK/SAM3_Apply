@@ -355,6 +355,58 @@ def set_ultralytics_image_features(image: Image.Image) -> Dict[str, Any]:
     return features
 
 
+def _crop_backbone_embedding(
+    features: Dict[str, Any],
+    box_xywh: List[float],
+    image_width: int,
+    image_height: int,
+) -> Optional[torch.Tensor]:
+    """根据图像框从 SAM3 最深层特征图提取归一化向量，供负例余弦过滤使用。"""
+    feature_maps = features.get("backbone_fpn") if isinstance(features, dict) else None
+    if not isinstance(feature_maps, list) or not feature_maps:
+        return None
+    feature_map = feature_maps[-1]
+    if not torch.is_tensor(feature_map) or feature_map.ndim != 4:
+        return None
+    _, _, map_height, map_width = feature_map.shape
+    x, y, width, height = [float(value) for value in box_xywh]
+    left = max(0, min(map_width - 1, int(x / max(1, image_width) * map_width)))
+    top = max(0, min(map_height - 1, int(y / max(1, image_height) * map_height)))
+    right = max(left + 1, min(map_width, int((x + width) / max(1, image_width) * map_width)))
+    bottom = max(top + 1, min(map_height, int((y + height) / max(1, image_height) * map_height)))
+    pooled = feature_map[0, :, top:bottom, left:right].mean(dim=(1, 2))
+    norm = torch.linalg.vector_norm(pooled)
+    if not torch.isfinite(norm) or float(norm) <= 0:
+        return None
+    return F.normalize(pooled.float(), dim=0).detach()
+
+
+def _negative_cosine_filter_records(
+    records: List[Dict[str, Any]],
+    negative_embeddings: List[torch.Tensor],
+    query_features: Dict[str, Any],
+    query_image: Image.Image,
+    similarity_threshold: float,
+) -> Tuple[List[Dict[str, Any]], int]:
+    """候选框完成相似目标检出后，与全部负例向量比较并过滤高相似候选。"""
+    if not negative_embeddings:
+        return records, 0
+    kept: List[Dict[str, Any]] = []
+    suppressed = 0
+    for record in records:
+        box = record["label"]["bnd_points"]
+        embedding = _crop_backbone_embedding(query_features, box, query_image.width, query_image.height)
+        max_similarity = -1.0
+        if embedding is not None:
+            max_similarity = max(float(torch.dot(embedding, negative)) for negative in negative_embeddings)
+        record["label"]["negative_similarity_score"] = round(max_similarity, 6)
+        if max_similarity > float(similarity_threshold):
+            suppressed += 1
+            continue
+        kept.append(record)
+    return kept, suppressed
+
+
 def extract_ultralytics_feature_arrays(
     masks: Optional[torch.Tensor],
     boxes: Optional[torch.Tensor],
@@ -2468,6 +2520,20 @@ def prepare_multi_visual_prompt_state(
             total_negative_reference_prompt_encode_ms += int(prompt_profile["negative_reference_prompt_encode_ms"])
             prepared_groups.append(prepared_group)
 
+        # 负例向量在准备阶段提取并缓存，查询多张图片时无需重复计算参考图特征。
+        negative_embeddings = []
+        for sample_ctx in sample_contexts:
+            if sample_ctx.get("sample_type") != "negative":
+                continue
+            embedding = _crop_backbone_embedding(
+                sample_ctx.get("reference_features") or {},
+                sample_ctx["ref_best_xywh"],
+                sample_ctx["reference_image"].width,
+                sample_ctx["reference_image"].height,
+            )
+            if embedding is not None:
+                negative_embeddings.append(embedding)
+
     positive_sample_count = sum(1 for sample_ctx in sample_contexts if sample_ctx.get("sample_type") != "negative")
     negative_sample_count = sum(1 for sample_ctx in sample_contexts if sample_ctx.get("sample_type") == "negative")
     reference_source_keys = {_reference_source_group_key(sample_ctx) for sample_ctx in sample_contexts}
@@ -2500,6 +2566,7 @@ def prepare_multi_visual_prompt_state(
         "reference_source_count": len(reference_source_keys),
         "reference_prompt_encode_ms": total_reference_prompt_encode_ms,
         "negative_reference_prompt_encode_ms": total_negative_reference_prompt_encode_ms,
+        "negative_embeddings": negative_embeddings,
         "prepare_time_ms": _elapsed_ms(start_time),
     }
 
@@ -2621,6 +2688,26 @@ def _run_multi_native_visual_prompt_query(
         )
 
     kept_records = _nms_multi_similar_records(candidate_records, nms_iou, top_k)
+    negative_embeddings: List[torch.Tensor] = []
+    for sample_ctx in sample_contexts:
+        if sample_ctx.get("sample_type") != "negative":
+            continue
+        embedding = _crop_backbone_embedding(
+            sample_ctx.get("reference_features") or {},
+            sample_ctx["ref_best_xywh"],
+            sample_ctx["reference_image"].width,
+            sample_ctx["reference_image"].height,
+        )
+        if embedding is not None:
+            negative_embeddings.append(embedding)
+    total_negative_filter_candidate_count = len(kept_records) if negative_embeddings else 0
+    kept_records, total_suppressed_by_negative_count = _negative_cosine_filter_records(
+        kept_records,
+        negative_embeddings,
+        query_features,
+        query_image,
+        similarity_threshold,
+    )
     if NMS_DEBUG:
         print(
             "SAM3 final NMS summary: "
@@ -2746,7 +2833,9 @@ def _run_multi_native_visual_prompt_query(
             "final_nms_iou": float(nms_iou),
             "native_multi_visual_prompt": True,
             "native_score_threshold": round(native_score_threshold, 6),
-            "similarity_threshold_applied": False,
+            "similarity_threshold_applied": bool(negative_embeddings),
+            "negative_cosine_filter_applied": bool(negative_embeddings),
+            "negative_cosine_threshold": float(similarity_threshold),
             "score_type": "sam_grounding_score",
             "groups": group_profiles,
         },
@@ -2861,6 +2950,15 @@ def run_multi_visual_prompt_query_with_state(
             )
 
     kept_records = _nms_multi_similar_records(candidate_records, nms_iou, top_k)
+    negative_embeddings = prompt_state.get("negative_embeddings") or []
+    total_negative_filter_candidate_count = len(kept_records) if negative_embeddings else 0
+    kept_records, total_suppressed_by_negative_count = _negative_cosine_filter_records(
+        kept_records,
+        negative_embeddings,
+        query_features,
+        query_image,
+        similarity_threshold,
+    )
     if NMS_DEBUG:
         print(
             "SAM3 final NMS summary: "
@@ -2943,7 +3041,9 @@ def run_multi_visual_prompt_query_with_state(
             "final_nms_iou": float(nms_iou),
             "native_multi_visual_prompt": True,
             "native_score_threshold": round(native_score_threshold, 6),
-            "similarity_threshold_applied": False,
+            "similarity_threshold_applied": bool(negative_embeddings),
+            "negative_cosine_filter_applied": bool(negative_embeddings),
+            "negative_cosine_threshold": float(similarity_threshold),
             "score_type": "sam_grounding_score",
             "groups": group_profiles,
         },

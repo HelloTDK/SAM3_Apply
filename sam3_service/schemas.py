@@ -177,10 +177,10 @@ class MultiSimilarObjectRequest(BaseModel):
     )
     top_k: int = Field(default=5, ge=1, le=50, description="Max results kept per category after NMS")
     similarity_threshold: float = Field(
-        default=0.6,
+        default=0.9,
         ge=-1.0,
         le=1.0,
-        description="兼容旧客户端的字段；当前 multi visual prompt 推理不使用余弦相似度过滤。",
+        description="负例余弦相似度过滤阈值；候选框与任一负例的相似度大于该值时会被过滤。",
     )
     sam_threshold: float = Field(
         default=0.6,
@@ -232,7 +232,12 @@ class SimilarObjectByUrlRequest(BaseModel):
     )
     query_image_url: str = Field(..., min_length=1, description="Remote query image path or URL")
     top_k: int = Field(default=5, ge=1, le=50, description="Max results kept per category after NMS")
-    similarity_threshold: float = Field(default=0.6, ge=-1.0, le=1.0)
+    similarity_threshold: float = Field(
+        default=0.9,
+        ge=-1.0,
+        le=1.0,
+        description="负例余弦相似度过滤阈值；候选框与任一负例的相似度大于该值时会被过滤。",
+    )
     sam_threshold: float = Field(default=0.6, ge=0.0, le=1.0)
     nms_iou: float = Field(default=0.45, ge=0.0, le=1.0)
     polygon_simplify_epsilon: float = Field(default=2.0, ge=0.0, le=50.0)
@@ -267,7 +272,12 @@ class SimilarObjectTaskCreateRequest(BaseModel):
     infer_batch_size: int = Field(default=16, ge=1, le=64)
     frame_time: int = Field(default=1, ge=0, description="Video sampling interval in frames; 0 means every frame")
     top_k: int = Field(default=5, ge=1, le=50)
-    similarity_threshold: float = Field(default=0.6, ge=-1.0, le=1.0)
+    similarity_threshold: float = Field(
+        default=0.9,
+        ge=-1.0,
+        le=1.0,
+        description="负例余弦相似度过滤阈值；候选框与任一负例的相似度大于该值时会被过滤。",
+    )
     sam_threshold: float = Field(default=0.6, ge=0.0, le=1.0)
     nms_iou: float = Field(default=0.45, ge=0.0, le=1.0)
     polygon_simplify_epsilon: float = Field(default=2.0, ge=0.0, le=50.0)

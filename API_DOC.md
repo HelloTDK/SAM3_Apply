@@ -389,8 +389,9 @@ http://192.168.100.25:8006/results/result_20260521_101000_000003.jpg
 
 说明：
 
-- 当前 multi visual prompt 链路里，负样例会直接编码成 SAM3 底层 box prompt 的 negative label，并和正样例一起进入同一次 grounding。
-- 为兼容旧响应，`profile` 中仍保留 `negative_grounding_forward_ms`、`negative_filter_candidates`、`suppressed_by_negative_samples` 等字段；在当前底层 negative box label 模式下，这些字段通常为 `0`，不再表示单独的负样例二次检索流程。
+- 当前 multi visual prompt 链路里，负样例会先编码成 SAM3 底层 box prompt 的 negative label，并和正样例一起进入同一次 grounding。
+- 目标框完成最终 NMS 后，服务会从 SAM3 backbone 特征图提取每个目标框和所有负例框的向量，计算余弦相似度；任一相似度严格大于 `similarity_threshold` 的目标框会被过滤。默认阈值为 `0.9`，没有负例时不会执行该过滤。
+- 每个保留的 `pic_labels` 项包含 `negative_similarity_score`（与所有负例的最大余弦相似度）。`profile.negative_filter_candidates`、`profile.suppressed_by_negative_samples`、`profile.negative_cosine_threshold` 可用于核验过滤数量和阈值。
 
 ### 3.4 URL 样例图单张标注
 
@@ -417,7 +418,7 @@ Authorization: Bearer <api_key>
   "query_image_url": "/group1/default/path/image.jpg",
   "top_k": 5,
   "sam_threshold": 0.6,
-  "similarity_threshold": 0.6,
+  "similarity_threshold": 0.9,
   "nms_iou": 0.45,
   "polygon_simplify_epsilon": 2.0,
   "return_result_image": false
@@ -436,7 +437,7 @@ Authorization: Bearer <api_key>
 | `query_image_url` | 是 | string | 待标注图片路径或完整 HTTP URL |
 | `top_k` | 否 | integer | 每个类别最多保留结果数，默认 `5`，范围 `1-50` |
 | `sam_threshold` | 否 | number | SAM3 grounding 分数阈值，默认 `0.6` |
-| `similarity_threshold` | 否 | number | 兼容字段；当前不执行余弦相似度过滤 |
+| `similarity_threshold` | 否 | number | 负例余弦相似度过滤阈值，默认 `0.9`，范围 `-1.0` 到 `1.0`；候选框与任一负例的相似度严格大于该值时过滤 |
 | `nms_iou` | 否 | number | 同类别最终 NMS 阈值，默认 `0.45`；当较小框有至少 `90%` 被同类别较大框覆盖时，也会按重框抑制 |
 | `polygon_simplify_epsilon` | 否 | number | 多边形简化参数，默认 `2.0` |
 | `return_result_image` | 否 | boolean | 是否生成可视化结果图；批量场景建议保持 `false` |
@@ -515,7 +516,7 @@ Authorization: Bearer <api_key>
   "frame_time": 25,
   "top_k": 5,
   "sam_threshold": 0.6,
-  "similarity_threshold": 0.6,
+  "similarity_threshold": 0.9,
   "nms_iou": 0.45,
   "polygon_simplify_epsilon": 2.0,
   "return_result_image": false,
@@ -538,7 +539,7 @@ Authorization: Bearer <api_key>
 | `frame_time` | 否 | integer | 视频抽帧间隔，按帧数计；`0` 表示逐帧，默认 `1` |
 | `top_k` | 否 | integer | 每个类别最多保留结果数，默认 `5` |
 | `sam_threshold` | 否 | number | SAM3 grounding 分数阈值，默认 `0.6` |
-| `similarity_threshold` | 否 | number | 兼容字段；当前不执行余弦相似度过滤 |
+| `similarity_threshold` | 否 | number | 负例余弦相似度过滤阈值，默认 `0.9`，范围 `-1.0` 到 `1.0`；候选框与任一负例的相似度严格大于该值时过滤 |
 | `nms_iou` | 否 | number | 同类别最终 NMS 阈值，默认 `0.45`；当较小框有至少 `90%` 被同类别较大框覆盖时，也会按重框抑制 |
 | `polygon_simplify_epsilon` | 否 | number | 多边形简化参数，默认 `2.0` |
 | `return_result_image` | 否 | boolean | 是否生成可视化结果图；5000 张批量时建议 `false` |
