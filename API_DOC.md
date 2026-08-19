@@ -390,7 +390,8 @@ http://192.168.100.25:8006/results/result_20260521_101000_000003.jpg
 说明：
 
 - 当前 multi visual prompt 链路里，负样例会直接编码成 SAM3 底层 box prompt 的 negative label，并和正样例一起进入同一次 grounding。
-- 为兼容旧响应，`profile` 中仍保留 `negative_grounding_forward_ms`、`negative_filter_candidates`、`suppressed_by_negative_samples` 等字段；在当前底层 negative box label 模式下，这些字段通常为 `0`，不再表示单独的负样例二次检索流程。
+- 为兼容旧响应，`profile` 中仍保留 `negative_grounding_forward_ms`、`negative_filter_candidates`、`suppressed_by_negative_samples` 等字段；过滤开关关闭时这些字段为 `0`，开启后记录二次检索和实际抑制数量。
+- 可通过环境变量 `SAM3_MULTI_NEGATIVE_FILTER_ENABLED=1` 开启负例二次过滤：服务会把同类别的负样例框按正样例再次检索，候选置信度默认要求 `0.9`（`SAM3_MULTI_NEGATIVE_FILTER_CONFIDENCE` 可调），再与原始结果按 IoU 比对，IoU 大于等于 `0.6` 的结果会被排除（`SAM3_MULTI_NEGATIVE_FILTER_IOU` 可调）。默认关闭，不影响既有调用。
 
 ### 3.4 URL 样例图单张标注
 

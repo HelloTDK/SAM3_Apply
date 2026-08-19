@@ -30,6 +30,8 @@ from .config import (
     INFER_DTYPE_STR,
     MAX_CONCURRENT_INFERENCES,
     MODEL_LABEL,
+    MULTI_NEGATIVE_FILTER_CONFIDENCE,
+    MULTI_NEGATIVE_FILTER_ENABLED,
     MULTI_NEGATIVE_FILTER_IOU,
     NMS_DEBUG,
     SERIALIZE_MODEL_ACCESS,
@@ -1428,6 +1430,71 @@ def _build_group_visual_prompt_embeddings(
     }
 
 
+def _build_negative_filter_prompt_embeddings(
+    group: Dict[str, Any],
+) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor], int]:
+    """将当前类别的所有负样例按正样例编码，供二次检索过滤使用。"""
+    if not MULTI_NEGATIVE_FILTER_ENABLED:
+        return None, None, 0
+
+    embeds: List[torch.Tensor] = []
+    masks: List[torch.Tensor] = []
+    encode_ms = 0
+    for source_group in group.get("negative_source_groups") or []:
+        reference_boxes = source_group.get("reference_boxes") or []
+        if not reference_boxes:
+            continue
+        # 这里故意使用正标签，让负样例框变成“要查找的目标”提示。
+        prompt_embed, prompt_mask, profile = _encode_reference_visual_prompt_from_boxes(
+            source_group["reference_image"],
+            reference_boxes,
+            source_group.get("reference_features"),
+            box_labels=[1] * len(reference_boxes),
+        )
+        encode_ms += int(profile["reference_prompt_encode_ms"])
+        embeds.append(prompt_embed)
+        masks.append(prompt_mask)
+    if not embeds:
+        return None, None, encode_ms
+    return torch.cat(embeds, dim=0), torch.cat(masks, dim=1), encode_ms
+
+
+def _run_negative_filter_query(
+    group: Dict[str, Any],
+    query_image: Image.Image,
+    query_features: Dict[str, Any],
+    native_score_threshold: float,
+    max_candidates: int,
+) -> Tuple[List[List[float]], Dict[str, int]]:
+    """按类别用负样例正向检索，并返回达到阈值的候选框。"""
+    visual_prompt_embed = group.get("negative_filter_visual_prompt_embed")
+    visual_prompt_mask = group.get("negative_filter_visual_prompt_mask")
+    if visual_prompt_embed is None or visual_prompt_mask is None:
+        return [], {"grounding_forward_ms": 0, "raw_candidates": 0, "post_nms_candidates": 0}
+    arrays, profile = _run_sam3_query_grounding_with_visual_prompt_embeddings(
+        query_image=query_image,
+        query_features=query_features,
+        visual_prompt_embed=visual_prompt_embed,
+        visual_prompt_mask=visual_prompt_mask,
+        text_prompt=group.get("text_prompt"),
+        confidence_threshold=MULTI_NEGATIVE_FILTER_CONFIDENCE,
+        max_candidates=max_candidates,
+    )
+    boxes = [
+        candidate["bnd_points"]
+        for candidate in _iter_primary_mask_candidates(
+            arrays,
+            query_image,
+            score_threshold=MULTI_NEGATIVE_FILTER_CONFIDENCE,
+        )
+    ]
+    return boxes, {
+        "grounding_forward_ms": int(profile["grounding_forward_ms"]),
+        "raw_candidates": int(profile["raw_candidate_count"]),
+        "post_nms_candidates": int(profile["kept_candidate_count"]),
+    }
+
+
 def _run_sam3_query_grounding_with_visual_prompt_embeddings(
     query_image: Image.Image,
     query_features: Dict[str, Any],
@@ -2464,6 +2531,15 @@ def prepare_multi_visual_prompt_state(
             prepared_group["negative_reference_prompt_encode_ms"] = int(
                 prompt_profile["negative_reference_prompt_encode_ms"]
             )
+            if MULTI_NEGATIVE_FILTER_ENABLED:
+                (
+                    prepared_group["negative_filter_visual_prompt_embed"],
+                    prepared_group["negative_filter_visual_prompt_mask"],
+                    negative_filter_encode_ms,
+                ) = _build_negative_filter_prompt_embeddings(group)
+            else:
+                negative_filter_encode_ms = 0
+            prepared_group["negative_filter_prompt_encode_ms"] = negative_filter_encode_ms
             total_reference_prompt_encode_ms += int(prompt_profile["reference_prompt_encode_ms"])
             total_negative_reference_prompt_encode_ms += int(prompt_profile["negative_reference_prompt_encode_ms"])
             prepared_groups.append(prepared_group)
@@ -2547,6 +2623,14 @@ def _run_multi_native_visual_prompt_query(
     group_profiles: List[Dict[str, Any]] = []
 
     for group in grouped_prompts:
+        if MULTI_NEGATIVE_FILTER_ENABLED:
+            (
+                group["negative_filter_visual_prompt_embed"],
+                group["negative_filter_visual_prompt_mask"],
+                negative_filter_encode_ms,
+            ) = _build_negative_filter_prompt_embeddings(group)
+        else:
+            negative_filter_encode_ms = 0
         merged_prompt_embed, merged_prompt_mask, prompt_profile = _build_group_visual_prompt_embeddings(group)
         group_prompt_encode_ms = int(prompt_profile["reference_prompt_encode_ms"])
         negative_prompt_encode_ms = int(prompt_profile["negative_reference_prompt_encode_ms"])
@@ -2610,6 +2694,7 @@ def _run_multi_native_visual_prompt_query(
                 "raw_candidates": int(group_profile["raw_candidate_count"]),
                 "post_nms_candidates": int(group_profile["kept_candidate_count"]),
                 "negative_reference_prompt_encode_ms": negative_prompt_encode_ms,
+                "negative_filter_prompt_encode_ms": negative_filter_encode_ms,
                 "negative_grounding_forward_ms": 0,
                 "negative_raw_candidates": 0,
                 "negative_post_nms_candidates": 0,
@@ -2619,6 +2704,38 @@ def _run_multi_native_visual_prompt_query(
                 "max_visual_prompt_candidates": max_visual_prompt_candidates,
             }
         )
+
+        # 负例过滤使用独立的正向提示检索，避免只降低原始结果置信度而不删除目标。
+        if MULTI_NEGATIVE_FILTER_ENABLED and group.get("negative_filter_visual_prompt_embed") is not None:
+            negative_boxes, negative_profile = _run_negative_filter_query(
+                group,
+                query_image,
+                query_features,
+                native_score_threshold,
+                max_visual_prompt_candidates,
+            )
+            total_negative_grounding_forward_ms += negative_profile["grounding_forward_ms"]
+            total_negative_raw_candidate_count += negative_profile["raw_candidates"]
+            total_negative_post_nms_candidate_count += negative_profile["post_nms_candidates"]
+            total_negative_filter_candidate_count += len(negative_boxes)
+            group_profiles[-1]["negative_grounding_forward_ms"] = negative_profile["grounding_forward_ms"]
+            group_profiles[-1]["negative_raw_candidates"] = negative_profile["raw_candidates"]
+            group_profiles[-1]["negative_post_nms_candidates"] = negative_profile["post_nms_candidates"]
+            group_profiles[-1]["negative_filter_candidates"] = len(negative_boxes)
+            if negative_boxes:
+                before_count = len(candidate_records)
+                candidate_records = [
+                    record
+                    for record in candidate_records
+                    if record["label"].get("category") != group["category"]
+                    or not any(
+                        bbox_iou_xywh(record["label"]["bnd_points"], negative_box) >= MULTI_NEGATIVE_FILTER_IOU
+                        for negative_box in negative_boxes
+                    )
+                ]
+                suppressed_count = before_count - len(candidate_records)
+                total_suppressed_by_negative_count += suppressed_count
+                group_profiles[-1]["suppressed_by_negative_samples"] = suppressed_count
 
     kept_records = _nms_multi_similar_records(candidate_records, nms_iou, top_k)
     if NMS_DEBUG:
@@ -2743,6 +2860,8 @@ def _run_multi_native_visual_prompt_query(
             "negative_filter_candidates": total_negative_filter_candidate_count,
             "suppressed_by_negative_samples": total_suppressed_by_negative_count,
             "negative_filter_iou": round(MULTI_NEGATIVE_FILTER_IOU, 6),
+            "negative_filter_enabled": MULTI_NEGATIVE_FILTER_ENABLED,
+            "negative_filter_confidence": round(MULTI_NEGATIVE_FILTER_CONFIDENCE, 6),
             "final_nms_iou": float(nms_iou),
             "native_multi_visual_prompt": True,
             "native_score_threshold": round(native_score_threshold, 6),
@@ -2850,6 +2969,7 @@ def run_multi_visual_prompt_query_with_state(
                     "raw_candidates": int(group_profile["raw_candidate_count"]),
                     "post_nms_candidates": int(group_profile["kept_candidate_count"]),
                     "negative_reference_prompt_encode_ms": int(group.get("negative_reference_prompt_encode_ms", 0)),
+                    "negative_filter_prompt_encode_ms": int(group.get("negative_filter_prompt_encode_ms", 0)),
                     "negative_grounding_forward_ms": 0,
                     "negative_raw_candidates": 0,
                     "negative_post_nms_candidates": 0,
@@ -2859,6 +2979,38 @@ def run_multi_visual_prompt_query_with_state(
                     "max_visual_prompt_candidates": max_visual_prompt_candidates,
                 }
             )
+
+            # 对每个类别独立执行负例正向检索，再按 IoU 抑制原始候选。
+            if MULTI_NEGATIVE_FILTER_ENABLED and group.get("negative_filter_visual_prompt_embed") is not None:
+                negative_boxes, negative_profile = _run_negative_filter_query(
+                    group,
+                    query_image,
+                    query_features,
+                    native_score_threshold,
+                    max_visual_prompt_candidates,
+                )
+                total_negative_grounding_forward_ms += negative_profile["grounding_forward_ms"]
+                total_negative_raw_candidate_count += negative_profile["raw_candidates"]
+                total_negative_post_nms_candidate_count += negative_profile["post_nms_candidates"]
+                total_negative_filter_candidate_count += len(negative_boxes)
+                group_profiles[-1]["negative_grounding_forward_ms"] = negative_profile["grounding_forward_ms"]
+                group_profiles[-1]["negative_raw_candidates"] = negative_profile["raw_candidates"]
+                group_profiles[-1]["negative_post_nms_candidates"] = negative_profile["post_nms_candidates"]
+                group_profiles[-1]["negative_filter_candidates"] = len(negative_boxes)
+                if negative_boxes:
+                    before_count = len(candidate_records)
+                    candidate_records = [
+                        record
+                        for record in candidate_records
+                        if record["label"].get("category") != group["category"]
+                        or not any(
+                            bbox_iou_xywh(record["label"]["bnd_points"], negative_box) >= MULTI_NEGATIVE_FILTER_IOU
+                            for negative_box in negative_boxes
+                        )
+                    ]
+                    suppressed_count = before_count - len(candidate_records)
+                    total_suppressed_by_negative_count += suppressed_count
+                    group_profiles[-1]["suppressed_by_negative_samples"] = suppressed_count
 
     kept_records = _nms_multi_similar_records(candidate_records, nms_iou, top_k)
     if NMS_DEBUG:
@@ -2940,6 +3092,8 @@ def run_multi_visual_prompt_query_with_state(
             "negative_filter_candidates": total_negative_filter_candidate_count,
             "suppressed_by_negative_samples": total_suppressed_by_negative_count,
             "negative_filter_iou": round(MULTI_NEGATIVE_FILTER_IOU, 6),
+            "negative_filter_enabled": MULTI_NEGATIVE_FILTER_ENABLED,
+            "negative_filter_confidence": round(MULTI_NEGATIVE_FILTER_CONFIDENCE, 6),
             "final_nms_iou": float(nms_iou),
             "native_multi_visual_prompt": True,
             "native_score_threshold": round(native_score_threshold, 6),
