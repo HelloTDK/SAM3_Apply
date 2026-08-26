@@ -454,24 +454,30 @@ def _prepare_prompt_group_specs(
 
             # 映射键是业务输出类别，映射值才是传给模型的文字条件。这样无需依赖
             # 人/person 等翻译结果，也不会把同一类别拆成两个独立检测组。
-            translated_terms: List[str] = []
+            prompt_terms: List[Dict[str, str]] = []
             for one_prompt in split_prompt_classes(original_prompt):
                 translated = translate_to_english(one_prompt)
                 translated = translated.strip() if translated else one_prompt
-                if translated and translated not in translated_terms:
-                    translated_terms.append(translated)
-            if not translated_terms:
+                if not translated:
+                    continue
+                # 多个文字条件必须拆成单条件规格。后续会让每个规格复用同一业务
+                # 类别的完整样例集合，避免把 A、B 当作一个组合目标发送给模型。
+                if not any(item["translated"] == translated for item in prompt_terms):
+                    prompt_terms.append({"original": one_prompt, "translated": translated})
+            if not prompt_terms:
                 continue
-            translated_prompt = "; ".join(translated_terms)
-            specs.append(
-                {
-                    "category": category,
-                    "text_prompt": translated_terms,
-                    "prompt": original_prompt,
-                    "translated_prompt": translated_prompt if translated_prompt != original_prompt else None,
-                    "was_translated": translated_prompt != original_prompt,
-                }
-            )
+            for prompt_term in prompt_terms:
+                original_term = prompt_term["original"]
+                translated_term = prompt_term["translated"]
+                specs.append(
+                    {
+                        "category": category,
+                        "text_prompt": [translated_term],
+                        "prompt": original_term,
+                        "translated_prompt": translated_term if translated_term != original_term else None,
+                        "was_translated": translated_term != original_term,
+                    }
+                )
         if specs:
             return specs
 
@@ -2290,9 +2296,11 @@ def _group_multi_sample_contexts_for_native_prompt(
     grouped: Dict[str, Dict[str, Any]] = {}
     ordered_groups: List[Dict[str, Any]] = []
     prompt_specs = _prepare_prompt_group_specs(prompt_text, prompt_category_map)
-    prompt_specs_by_category = {
-        _normalize_prompt_label(spec["category"]).lower(): spec for spec in prompt_specs
-    }
+    prompt_specs_by_category: Dict[str, List[Dict[str, Any]]] = {}
+    for spec in prompt_specs:
+        normalized_category = _normalize_prompt_label(spec["category"]).lower()
+        if normalized_category:
+            prompt_specs_by_category.setdefault(normalized_category, []).append(spec)
     finalized_categories = set()
 
     for sample_ctx in sample_contexts:
@@ -2346,56 +2354,51 @@ def _group_multi_sample_contexts_for_native_prompt(
     for group in ordered_groups:
         prompt_source_contexts = group["positive_sample_contexts"] or group["sample_contexts"]
         text_prompt, original_prompt, translated_prompt, was_translated = _resolve_multi_group_text_prompt(prompt_source_contexts)
-        applied_prompt_spec: Optional[Dict[str, Any]] = None
+        applied_prompt_specs: List[Dict[str, Any]] = []
         if text_prompt is None:
             normalized_category = _normalize_prompt_label(group["category"]).lower()
-            prompt_spec = prompt_specs_by_category.get(normalized_category)
-            if prompt_spec is None:
+            applied_prompt_specs = list(prompt_specs_by_category.get(normalized_category, []))
+            if not applied_prompt_specs:
                 # 样例类别和文字类别可能分别是英文/中文，例如 person 和“人员”。
                 # 此处按翻译后的语义补充匹配，维持同类别 prompt 的融合能力。
-                prompt_spec = next(
-                    (
-                        candidate
-                        for candidate in prompt_specs
-                        if _prompt_spec_matches_sample_category(group["category"], candidate)
-                    ),
-                    None,
-                )
-            if prompt_spec is not None and _prompt_spec_matches_sample_category(
-                group["category"],
-                prompt_spec,
-            ):
-                # 仅同类别的文字 prompt 才能与样例 visual prompt 融合。类别不同时
-                # 必须保留纯文本分组，确保“样例标注 + 文字标注”同时返回结果。
-                applied_prompt_spec = prompt_spec
-                text_prompt = prompt_spec["text_prompt"]
-                original_prompt = prompt_spec["prompt"]
-                translated_prompt = prompt_spec["translated_prompt"]
-                was_translated = prompt_spec["was_translated"]
+                applied_prompt_specs = [
+                    candidate
+                    for candidate in prompt_specs
+                    if _prompt_spec_matches_sample_category(group["category"], candidate)
+                ]
         if not group["positive_sample_contexts"] and text_prompt is None:
             continue
         finalized_categories.add(_normalize_prompt_label(group["category"]).lower())
-        finalized_groups.append(
+        # 无可融合文字时保留原有的纯样例组；有多个文字条件时，为每个条件创建
+        # 独立组，并复用同一份正负样例，结果类别始终保持为业务类别。
+        group_prompt_specs = applied_prompt_specs or [
             {
-                "category": group["category"],
-                "sample_contexts": group["positive_sample_contexts"],
-                "negative_sample_contexts": group["negative_sample_contexts"],
-                "sample_ids": group["sample_ids"],
-                "source_image_ids": group["source_image_ids"],
-                "sample_id_display": _format_multi_prompt_source_label(group["sample_ids"]),
-                "source_image_id_display": _format_multi_prompt_source_label(group["source_image_ids"]),
-                "source_groups": list(group["source_groups"].values()),
-                "negative_sample_ids": group["negative_sample_ids"],
-                "negative_source_image_ids": group["negative_source_image_ids"],
-                "negative_source_groups": list(group["negative_source_groups"].values()),
                 "text_prompt": text_prompt,
                 "prompt": original_prompt,
-                "translated_prompt": translated_prompt if was_translated else None,
+                "translated_prompt": translated_prompt,
                 "was_translated": was_translated,
             }
-        )
-        if applied_prompt_spec is not None:
-            finalized_categories.add(_normalize_prompt_label(applied_prompt_spec["category"]).lower())
+        ]
+        for prompt_spec in group_prompt_specs:
+            finalized_groups.append(
+                {
+                    "category": group["category"],
+                    "sample_contexts": group["positive_sample_contexts"],
+                    "negative_sample_contexts": group["negative_sample_contexts"],
+                    "sample_ids": group["sample_ids"],
+                    "source_image_ids": group["source_image_ids"],
+                    "sample_id_display": _format_multi_prompt_source_label(group["sample_ids"]),
+                    "source_image_id_display": _format_multi_prompt_source_label(group["source_image_ids"]),
+                    "source_groups": list(group["source_groups"].values()),
+                    "negative_sample_ids": group["negative_sample_ids"],
+                    "negative_source_image_ids": group["negative_source_image_ids"],
+                    "negative_source_groups": list(group["negative_source_groups"].values()),
+                    "text_prompt": prompt_spec["text_prompt"],
+                    "prompt": prompt_spec["prompt"],
+                    "translated_prompt": prompt_spec["translated_prompt"] if prompt_spec["was_translated"] else None,
+                    "was_translated": prompt_spec["was_translated"],
+                }
+            )
 
     for prompt_spec in prompt_specs:
         normalized_category = _normalize_prompt_label(prompt_spec["category"]).lower()

@@ -744,6 +744,7 @@ Long polling 语义：
 - `mark_info` 推荐使用 object 或 object-string；为兼容旧数据，当前也支持 `[x, y, width, height]` 数组格式。
 - 样例图会按图片聚合，同一张样例图只提取一次特征。
 - 样例 prompt embedding 会缓存；相同 `download_url + sample_url + sample_url内容 + top_k + prompt_category_map` 命中缓存时，不重复下载样例图和编码样例 prompt。
+- 当 `prompt_category_map` 的同一业务类别映射多个文字条件（如 `{"bottle": "水杯，显示器"}`）时，服务会将其拆为独立的文字检测组；每个检测组都会复用该业务类别的全部正负样例，最终结果仍返回为原业务类别 `bottle`。
 
 ### 3.7 `data_url` 文件格式
 
