@@ -892,6 +892,7 @@ def _build_box_segmentation_result(
     index: int,
     requested_bnd_points: List[float],
     polygon_simplify_epsilon: float,
+    prediction_index: Optional[int] = None,
 ) -> Dict[str, Any]:
     """把一次 box prompt 的模型输出转成接口需要的单个框选分割结果。"""
     masks_np = arrays["masks"]
@@ -911,8 +912,10 @@ def _build_box_segmentation_result(
         and masks_np.shape[0] > 0
     )
     if has_predictions:
-        # Ultralytics 返回顺序通常和输入框顺序一致；防御性地限制 index 边界。
-        best_index = min(index, scores_np.shape[0] - 1)
+        # 多框推理时模型可能按置信度重排输出，不能直接用输入框 index 取预测。
+        # 调用方已根据框 IoU 计算 prediction_index；没有匹配结果时再按序兜底。
+        selected_index = index if prediction_index is None else prediction_index
+        best_index = min(max(0, selected_index), scores_np.shape[0] - 1)
         score = round(float(scores_np[best_index]), 6)
 
         best_mask = np.asarray(masks_np[best_index])
@@ -939,6 +942,43 @@ def _build_box_segmentation_result(
         "mask_area": mask_area,
         "used_fallback": used_fallback,
     }
+
+
+def _match_box_prompt_predictions(
+    requested_boxes: List[List[float]],
+    predicted_boxes: Any,
+) -> List[Optional[int]]:
+    """按请求框与模型预测框的 IoU 做一对一匹配，避免多框结果顺序变化导致串类。"""
+    if not isinstance(predicted_boxes, np.ndarray) or predicted_boxes.ndim < 2 or predicted_boxes.shape[1] < 4:
+        return [None] * len(requested_boxes)
+
+    def iou(box_a: List[float], box_b: Any) -> float:
+        try:
+            ax1, ay1, aw, ah = [float(value) for value in box_a[:4]]
+            bx1, by1, bx2, by2 = [float(value) for value in box_b[:4]]
+        except (TypeError, ValueError):
+            return 0.0
+        ax2, ay2 = ax1 + aw, ay1 + ah
+        inter_w = max(0.0, min(ax2, bx2) - max(ax1, bx1))
+        inter_h = max(0.0, min(ay2, by2) - max(ay1, by1))
+        inter = inter_w * inter_h
+        area_a = max(0.0, aw) * max(0.0, ah)
+        area_b = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
+        union = area_a + area_b - inter
+        return inter / union if union > 0 else 0.0
+
+    pairs = []
+    for request_index, request_box in enumerate(requested_boxes):
+        for prediction_index, predicted_box in enumerate(predicted_boxes):
+            # 同 IoU 时优先保持原顺序，结果更稳定。
+            pairs.append((iou(request_box, predicted_box), -abs(request_index - prediction_index), request_index, prediction_index))
+    matches: List[Optional[int]] = [None] * len(requested_boxes)
+    used_predictions = set()
+    for score, _order_bonus, request_index, prediction_index in sorted(pairs, reverse=True):
+        if request_index < len(matches) and matches[request_index] is None and prediction_index not in used_predictions and score > 0:
+            matches[request_index] = prediction_index
+            used_predictions.add(prediction_index)
+    return matches
 
 
 def run_box_segmentation_pipeline(
@@ -977,12 +1017,14 @@ def run_box_segmentation_pipeline(
             confidence_threshold=0.0,
         )
         arrays = extract_ultralytics_arrays(result)
+        prediction_indices = _match_box_prompt_predictions(clipped_boxes, arrays.get("boxes"))
         for index, clipped_box in enumerate(clipped_boxes):
             one_result = _build_box_segmentation_result(
                 arrays=arrays,
                 index=index,
                 requested_bnd_points=clipped_box,
                 polygon_simplify_epsilon=polygon_simplify_epsilon,
+                prediction_index=prediction_indices[index],
             )
             one_result["index"] = index
             segmentations.append(one_result)
