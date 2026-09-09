@@ -66,7 +66,7 @@ Authorization: Bearer <api_key>
 | --- | --- | --- | --- |
 | `pic_id` | 是 | string | 客户端图片 ID |
 | `image_base64` | 是 | string | 待识别图片 |
-| `prompt` | 是 | string | 类别文本，支持 `;` 或 `,` 分隔；中文会自动翻译成英文 |
+| `prompt` | 是 | string | 类别文本，仅支持英文分号 `;` 或中文分号 `；` 分隔；逗号属于类别文本，不会拆分类别；中文会自动翻译成英文 |
 | `confidence_threshold` | 否 | number | 置信度阈值，默认 `0.3` |
 | `polygon_simplify_epsilon` | 否 | number | 多边形简化参数，默认 `2.0` |
 
@@ -433,7 +433,7 @@ Authorization: Bearer <api_key>
 | `pic_id` | 是 | string | 客户端图片 ID |
 | `download_url` | 是 | string | 下载服务根地址。相对路径会拼接成 `{download_url}/{path}` |
 | `sample_url` | 否 | string | 样例标注文件路径或完整 HTTP URL；有正样例时使用 |
-| `prompt` | 否 | string | 顶层文本 prompt；当 `sample_url` 没有正样例或完全省略时必填，支持 `;` / `,` 分隔，中文会自动翻译。与样例 `label_id` 同类别（兼容中英文名称）时，会融合为该样例类别的文本条件；类别不同时，会额外创建独立的纯文本检测组并与样例结果一起返回。 |
+| `prompt` | 否 | string | 顶层文本 prompt；当 `sample_url` 没有正样例或完全省略时必填，仅支持英文分号 `;` 或中文分号 `；` 分隔，逗号属于类别文本且不会拆分类别，中文会自动翻译。与样例 `label_id` 同类别（兼容中英文名称）时，会融合为该样例类别的文本条件；类别不同时，会额外创建独立的纯文本检测组并与样例结果一起返回。 |
 | `prompt_category_map` | 否 | object | 业务类别到模型文字 prompt 的映射，例如 `{"person":"人"}`。样例模式推荐传入；服务端按键与 `label_id` 匹配，按值执行文字检测，避免翻译结果差异导致同一业务类别被拆成多个分组。 |
 | `query_image_url` | 是 | string | 待标注图片路径或完整 HTTP URL |
 | `top_k` | 否 | integer | 每个类别最多保留结果数，默认 `5`，范围 `1-50` |
@@ -534,7 +534,7 @@ Authorization: Bearer <api_key>
 | `data_type` | 否 | integer | `0` 表示图片清单；非 `0` 表示视频清单 |
 | `data_url` | 是 | string | 待标注图片/视频清单路径或完整 HTTP URL |
 | `sample_url` | 否 | string | 样例标注文件路径或完整 HTTP URL；有正样例时使用 |
-| `prompt` | 否 | string | 顶层文本 prompt；当 `sample_url` 没有正样例或完全省略时必填，支持 `;` / `,` 分隔，中文会自动翻译。与样例 `label_id` 同类别（兼容中英文名称）时，会融合为该样例类别的文本条件；类别不同时，会额外创建独立的纯文本检测组并与样例结果一起返回。 |
+| `prompt` | 否 | string | 顶层文本 prompt；当 `sample_url` 没有正样例或完全省略时必填，仅支持英文分号 `;` 或中文分号 `；` 分隔，逗号属于类别文本且不会拆分类别，中文会自动翻译。与样例 `label_id` 同类别（兼容中英文名称）时，会融合为该样例类别的文本条件；类别不同时，会额外创建独立的纯文本检测组并与样例结果一起返回。 |
 | `prompt_category_map` | 否 | object | 业务类别到模型文字 prompt 的映射，例如 `{"person":"人"}`。样例模式推荐传入；服务端按键与 `label_id` 匹配，按值执行文字检测，避免翻译结果差异导致同一业务类别被拆成多个分组。 |
 | `infer_batch_size` | 否 | integer | 预留分批参数，默认 `16`，范围 `1-64` |
 | `frame_time` | 否 | integer | 视频抽帧间隔，按帧数计；`0` 表示逐帧，默认 `1` |
@@ -844,7 +844,7 @@ curl -X POST 'http://192.168.100.25:8006/similar-detect' \
 | `sample_file` | 条件必填 | file/list | 样例图；传了 `sample_meta` 样例实例时必填，可重复传多张 |
 | `query_file` | 是 | file/list | 待识别图；可重复传多张 |
 | `sample_meta` | 否 | string | JSON 数组，描述每个样例实例的 `file_index`、正负样本、类别和框；纯文本模式可传 `[]` 或省略 |
-| `prompt` | 否 | string | 顶层文本 prompt；当没有正样例时必填，支持 `;` / `,` 分隔，中文会自动翻译 |
+| `prompt` | 否 | string | 顶层文本 prompt；当没有正样例时必填，仅支持英文分号 `;` 或中文分号 `；` 分隔，逗号属于类别文本且不会拆分类别，中文会自动翻译 |
 | `top_k` | 否 | integer | 默认 `5` |
 | `sam_threshold` | 否 | number | SAM3 grounding 分数阈值，默认 `0.6` |
 | `similarity_threshold` | 否 | number | 兼容旧客户端字段；当前不再执行余弦相似度过滤 |

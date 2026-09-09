@@ -415,7 +415,7 @@ def _prepare_detection_classes(prompt: str) -> Tuple[List[Dict[str, Any]], str, 
     """拆分类别 prompt，必要时翻译成英文，并为可视化分配颜色。"""
     original_classes = split_prompt_classes(prompt)
     if not original_classes:
-        raise ValueError("Prompt is empty after parsing. Use ';' or ',' to separate classes.")
+        raise ValueError("Prompt is empty after parsing. Use ';' or '；' to separate classes.")
 
     classes_info: List[Dict[str, Any]] = []
     translated_classes: List[str] = []

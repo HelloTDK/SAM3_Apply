@@ -8,7 +8,7 @@ from .image_utils import normalize_box_segmentation_inputs
 class SegmentationRequest(BaseModel):
     pic_id: str = Field(..., min_length=1, max_length=128, description="Client image ID")
     image_base64: str = Field(..., description="Base64 image string or data URL")
-    prompt: str = Field(..., description="Classes separated by ';' or ','")
+    prompt: str = Field(..., description="Classes separated by ';' or '；'; commas are preserved as prompt text")
     confidence_threshold: float = Field(default=0.3, ge=0.0, le=1.0)
     polygon_simplify_epsilon: float = Field(default=2.0, ge=0.0, le=50.0)
 

@@ -452,9 +452,10 @@ def translate_to_english(text: str) -> str:
 
 
 def split_prompt_classes(prompt_text: str) -> List[str]:
+    """只按英文分号或中文分号拆分类别，逗号保留为类别文本。"""
     if not prompt_text:
         return []
-    return [item.strip() for item in re.split(r"[;；,，]+", prompt_text) if item.strip()]
+    return [item.strip() for item in re.split(r"[;；]+", prompt_text) if item.strip()]
 
 
 def prepare_single_text_prompt(prompt_text: Optional[str]) -> Tuple[Optional[List[str]], Optional[str], Optional[str], bool]:
