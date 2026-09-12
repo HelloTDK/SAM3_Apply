@@ -452,10 +452,12 @@ def translate_to_english(text: str) -> str:
 
 
 def split_prompt_classes(prompt_text: str) -> List[str]:
-    """只按英文分号或中文分号拆分类别，逗号保留为类别文本。"""
+    """只按 # 拆分类别，其他标点保留为类别文本。"""
     if not prompt_text:
         return []
-    return [item.strip() for item in re.split(r"[;；]+", prompt_text) if item.strip()]
+    # 与训练服务端保持一致，支持 #人#猫\n#桌子 这类前置分隔符和换行组合写法。
+    normalized_text = re.sub(r"\s*#\s*", "#", prompt_text)
+    return [item.strip() for item in re.split(r"#+", normalized_text) if item.strip()]
 
 
 def prepare_single_text_prompt(prompt_text: Optional[str]) -> Tuple[Optional[List[str]], Optional[str], Optional[str], bool]:

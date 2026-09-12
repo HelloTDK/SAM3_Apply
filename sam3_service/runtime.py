@@ -415,7 +415,7 @@ def _prepare_detection_classes(prompt: str) -> Tuple[List[Dict[str, Any]], str, 
     """拆分类别 prompt，必要时翻译成英文，并为可视化分配颜色。"""
     original_classes = split_prompt_classes(prompt)
     if not original_classes:
-        raise ValueError("Prompt is empty after parsing. Use ';' or '；' to separate classes.")
+        raise ValueError("Prompt is empty after parsing. Use '#' to separate classes.")
 
     classes_info: List[Dict[str, Any]] = []
     translated_classes: List[str] = []
@@ -434,8 +434,9 @@ def _prepare_detection_classes(prompt: str) -> Tuple[List[Dict[str, Any]], str, 
             }
         )
 
-    translated_prompt = "; ".join(translated_classes)
-    original_prompt = "; ".join(original_classes)
+    # 对外返回与输入一致的 # 分隔格式，便于调用方直接复用该字段。
+    translated_prompt = "#".join(translated_classes)
+    original_prompt = "#".join(original_classes)
     return classes_info, translated_prompt, translated_prompt != original_prompt
 
 
@@ -2324,8 +2325,9 @@ def _resolve_multi_group_text_prompt(
         original_prompt = unique_original[0]
         return [translated_prompt], original_prompt, translated_prompt, translated_prompt != original_prompt
 
-    original_prompt_joined = "; ".join(unique_original)
-    translated_prompt_joined = "; ".join(unique_translated)
+    # 多个文字条件以 # 拼接，避免重新引入已废弃的分号分隔语义。
+    original_prompt_joined = "#".join(unique_original)
+    translated_prompt_joined = "#".join(unique_translated)
     return None, original_prompt_joined, translated_prompt_joined, translated_prompt_joined != original_prompt_joined
 
 
