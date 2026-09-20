@@ -25,8 +25,15 @@ else
     exit 1
 fi
 
-echo "Activating conda env: sam3"
-conda activate sam3
+SAM3_CONDA_ENV="${SAM3_CONDA_ENV:-base}"
+echo "Activating conda env: ${SAM3_CONDA_ENV}"
+conda activate "${SAM3_CONDA_ENV}"
+
+# Docker 非交互 shell 不读取 ~/.bashrc，需要在启动脚本中显式暴露 CUDA/TRT 动态库。
+export SAM3_CUDA_HOME="${SAM3_CUDA_HOME:-/usr/local/cuda-12.8}"
+export SAM3_TRT_ROOT="${SAM3_TRT_ROOT:-/usr/local/TensorRT-10.8.0.43}"
+export PATH="${SAM3_CUDA_HOME}/bin:${SAM3_TRT_ROOT}/bin:${PATH}"
+export LD_LIBRARY_PATH="${SAM3_TRT_ROOT}/lib:${SAM3_TRT_ROOT}/targets/x86_64-linux-gnu/lib:${SAM3_CUDA_HOME}/lib64${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 
 # Create necessary directories
 mkdir -p uploads results static
@@ -34,20 +41,19 @@ export PYTHONPATH="${SCRIPT_DIR}/_vendor${PYTHONPATH:+:${PYTHONPATH}}"
 export MPLCONFIGDIR="${MPLCONFIGDIR:-${SCRIPT_DIR}/.matplotlib}"
 mkdir -p "${MPLCONFIGDIR}"
 
-# Check if model exists
-if [ ! -f "weights/sam3.pt" ]; then
-    echo "ERROR: Model file 'weights/sam3.pt' not found."
-    exit 1
+if [ -z "${SAM3_TRT_ENGINE_DIR:-}" ]; then
+    # 默认只使用当前程序内置的 TensorRT engine。
+    export SAM3_TRT_ENGINE_DIR="${SCRIPT_DIR}/engines"
 fi
 
 python - <<'PY'
 try:
-    import ultralytics  # noqa: F401
-    from ultralytics.models.sam import SAM3SemanticPredictor  # noqa: F401
+    import cupy  # noqa: F401
+    import tensorrt  # noqa: F401
+    import tokenizers  # noqa: F401
 except Exception as exc:
     raise SystemExit(
-        "ERROR: ultralytics with SAM3 support is required in conda env 'sam3'. "
-        "Run: python -m pip install -U 'ultralytics>=8.4.51'\n"
+        "ERROR: TensorRT/CuPy/tokenizers are required in the current environment.\n"
         f"Import error: {exc}"
     )
 PY
@@ -62,8 +68,6 @@ export SAM3_ARGOS_MODEL_DIR="${SAM3_ARGOS_MODEL_DIR:-${SCRIPT_DIR}/argos_models}
 export SAM3_ARGOS_AUTO_INSTALL="${SAM3_ARGOS_AUTO_INSTALL:-0}"
 export SAM3_ARGOS_FORCE_OFFLINE="${SAM3_ARGOS_FORCE_OFFLINE:-1}"
 export SAM3_CUDA_CLEANUP_AFTER_REQUEST="${SAM3_CUDA_CLEANUP_AFTER_REQUEST:-1}"
-export SAM3_IDLE_MODEL_UNLOAD_SECONDS="${SAM3_IDLE_MODEL_UNLOAD_SECONDS:-0}"
-export SAM3_CUDA_CLEANUP_LOG="${SAM3_CUDA_CLEANUP_LOG:-0}"
 
 # Optional: set local stanza resources if the zh->en package exists.
 if [ -d "${ARGOS_PACKAGES_DIR}" ]; then
@@ -76,13 +80,14 @@ fi
 echo "======================================="
 echo "Server URL: http://localhost:${SAM3_PORT}"
 echo "OpenAPI docs: http://localhost:${SAM3_PORT}/docs"
+echo "SAM3_TRT_ENGINE_DIR=${SAM3_TRT_ENGINE_DIR}"
+echo "SAM3_TRT_ROOT=${SAM3_TRT_ROOT}"
+echo "SAM3_CUDA_HOME=${SAM3_CUDA_HOME}"
 echo "ARGOS_PACKAGES_DIR=${ARGOS_PACKAGES_DIR}"
 echo "SAM3_ARGOS_MODEL_DIR=${SAM3_ARGOS_MODEL_DIR}"
 echo "SAM3_ARGOS_AUTO_INSTALL=${SAM3_ARGOS_AUTO_INSTALL}"
 echo "SAM3_ARGOS_FORCE_OFFLINE=${SAM3_ARGOS_FORCE_OFFLINE}"
 echo "SAM3_CUDA_CLEANUP_AFTER_REQUEST=${SAM3_CUDA_CLEANUP_AFTER_REQUEST}"
-echo "SAM3_IDLE_MODEL_UNLOAD_SECONDS=${SAM3_IDLE_MODEL_UNLOAD_SECONDS}"
-echo "SAM3_CUDA_CLEANUP_LOG=${SAM3_CUDA_CLEANUP_LOG}"
 if [ -n "${STANZA_RESOURCES_DIR:-}" ]; then
     echo "STANZA_RESOURCES_DIR=${STANZA_RESOURCES_DIR}"
 fi

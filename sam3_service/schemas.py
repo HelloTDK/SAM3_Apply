@@ -11,6 +11,7 @@ class SegmentationRequest(BaseModel):
     prompt: str = Field(..., description="Classes separated by '#'; other punctuation is preserved as prompt text")
     confidence_threshold: float = Field(default=0.3, ge=0.0, le=1.0)
     polygon_simplify_epsilon: float = Field(default=2.0, ge=0.0, le=50.0)
+    return_result_image: bool = Field(default=False, description="是否生成并保存可视化结果图")
 
 
 class BoxSegmentationRequest(BaseModel):

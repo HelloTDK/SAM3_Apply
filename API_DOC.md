@@ -1,4 +1,4 @@
-# SAM3 接口文档
+# SAM3 TensorRT 接口文档
 
 服务地址示例：`http://192.168.100.25:8006`
 
@@ -8,6 +8,8 @@
 - 画区域 / box 分割：用户给框，SAM3 分割框内目标。
 - 示例目标相似识别：包括跨图特征匹配识别、同图拉框识别。
 - 样例图标注：通过远程 `sample_url` 和 `data_url` 批量标注图片，避免传输大量 Base64。
+
+当前服务的视觉编码、文字编码、几何 prompt 编码和 mask decoder 均由 TensorRT engine 执行；HTTP 路径、请求字段及响应字段保持兼容。
 
 坐标约定：
 
@@ -54,7 +56,8 @@ Authorization: Bearer <api_key>
   "image_base64": "data:image/jpeg;base64,/9j/...",
   "prompt": "#人#安全帽#车辆",
   "confidence_threshold": 0.3,
-  "polygon_simplify_epsilon": 2.0
+  "polygon_simplify_epsilon": 2.0,
+  "return_result_image": false
 }
 ```
 
@@ -69,12 +72,13 @@ Authorization: Bearer <api_key>
 | `prompt` | 是 | string | 类别文本，仅支持 `#` 分隔，例如 `#人#猫#桌子`；分隔符两侧允许换行或空白，故 `#人#猫\n#桌子` 也等价于三个类别；中文会自动翻译成英文 |
 | `confidence_threshold` | 否 | number | 置信度阈值，默认 `0.3` |
 | `polygon_simplify_epsilon` | 否 | number | 多边形简化参数，默认 `2.0` |
+| `return_result_image` | 否 | boolean | 是否生成并保存可视化结果图，默认 `false`；需要调试图时显式传 `true` |
 
 响应示例：
 
 ```json
 {
-  "model": "ultralytics-sam3",
+  "model": "sam3-tensorrt",
   "pic_id": "demo-001",
   "success": true,
   "pic_labels": [
@@ -94,6 +98,7 @@ Authorization: Bearer <api_key>
   "translated_prompt": "#person#helmet#vehicle",
   "was_translated": true,
   "confidence_threshold": 0.3,
+  "result_image": null,
   "created": 1779340000,
   "processing_time_ms": 850
 }
@@ -112,6 +117,8 @@ Authorization: Bearer <api_key>
 | `confidence` | 否 | number | 默认 `0.3` |
 | `polygon_simplify_epsilon` | 否 | number | 默认 `2.0` |
 | `pic_id` | 否 | string | 图片 ID |
+
+该页面测试接口会生成并保存可视化结果图；生产批量调用请使用 `/v1/segmentations` 并保持 `return_result_image=false`。
 
 curl 示例：
 
@@ -174,7 +181,7 @@ Authorization: Bearer <api_key>
 
 ```json
 {
-  "model": "ultralytics-sam3",
+  "model": "sam3-tensorrt",
   "pic_id": "box-001",
   "success": true,
   "segmentations": [
@@ -447,7 +454,7 @@ Authorization: Bearer <api_key>
 
 ```json
 {
-  "model": "ultralytics-sam3",
+  "model": "sam3-tensorrt",
   "pic_id": "image-001",
   "success": true,
   "similar_mode": "multi_visual_prompt_url",
@@ -889,7 +896,7 @@ curl -X POST 'http://192.168.100.25:8006/similar-detect' \
 
 ### 500
 
-模型推理失败。建议先查看服务日志，重点看 CUDA、显存、checkpoint 路径和 Ultralytics 版本。
+模型推理失败。建议先查看服务日志，重点检查 CUDA/显存、`SAM3_TRT_ENGINE_DIR`、engine 与当前 GPU compute capability/TensorRT 版本是否匹配。
 
 ## 7. 推荐调用选择
 

@@ -15,25 +15,18 @@ from PIL import Image
 from .auth import api_key_manager, require_admin_key, require_api_key
 from .config import (
     CUDA_CLEANUP_AFTER_REQUEST,
-    IDLE_MODEL_UNLOAD_SECONDS,
     MAX_CONCURRENT_INFERENCES,
     MAX_IMAGE_BYTES,
     MODEL_LABEL,
     SAVE_UPLOADS,
-    SERIALIZE_MODEL_ACCESS,
     STATIC_DIR,
-    ULTRALYTICS_IMGSZ,
 )
 from .image_utils import decode_base64_image, parse_optional_bnd_points_text, save_upload_image
+from . import trt_runtime as runtime
 from .runtime import (
-    ACTIVE_INFERENCE_COUNT,
-    IDLE_MODEL_UNLOADED,
     INFERENCE_SEMAPHORE,
     INFERENCE_STATE_LOCK,
-    LAST_INFERENCE_FINISHED_AT,
-    device,
     get_cuda_memory_stats,
-    predictor,
     run_box_segmentation_pipeline,
     run_detection_pipeline,
     run_inference_in_thread,
@@ -91,27 +84,6 @@ def register_routes(app: FastAPI) -> None:
 
         routes.sort(key=lambda item: (item["path"], ",".join(item["methods"])))
         return routes
-
-
-    def build_single_positive_sample(
-        reference_image: Image.Image,
-        reference_bnd_points: List[float],
-        prompt: Optional[str],
-    ) -> List[Dict[str, Any]]:
-        prompt_text = (prompt or "").strip() or None
-        return [
-            {
-                "sample_id": "single_reference",
-                "source_image_id": "single_reference",
-                "sample_type": "positive",
-                "is_negative": False,
-                "category": prompt_text or "similar_object",
-                "reference_image": reference_image,
-                "reference_bnd_points": reference_bnd_points,
-                "paste_bnd_points": None,
-                "prompt": prompt_text,
-            }
-        ]
 
 
     @app.get("/api-list.json")
@@ -189,8 +161,8 @@ def register_routes(app: FastAPI) -> None:
 
     # 推理类接口统一遵循同一个并发模型：
     # 先用 INFERENCE_SEMAPHORE 控制进入后台线程池的请求数，再交给 runtime
-    # 中的 pipeline。真正访问共享 predictor 时，runtime 内部还会用 MODEL_LOCK
-    # 串行化模型状态，避免多个请求互相覆盖当前图片、特征或 prompt。
+    # 中的 pipeline。真正访问共享 TensorRT context 时，运行时内部还会加锁，
+    # 避免多个请求同时改写动态 shape 和显存地址。
     @app.post("/v1/segmentations")
     async def create_segmentation(
         payload: SegmentationRequest,
@@ -213,6 +185,7 @@ def register_routes(app: FastAPI) -> None:
                     payload.confidence_threshold,
                     payload.polygon_simplify_epsilon,
                     payload.pic_id,
+                    payload.return_result_image,
                 )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -272,34 +245,20 @@ def register_routes(app: FastAPI) -> None:
 
         try:
             async with INFERENCE_SEMAPHORE:
-                if payload.similar_mode == "same_image_prompt":
-                    result = await run_inference_in_thread(
-                        run_similar_object_batch_pipeline,
-                        reference_image,
-                        query_images,
-                        payload.reference_bnd_points,
-                        payload.top_k,
-                        payload.similarity_threshold,
-                        payload.sam_threshold,
-                        payload.polygon_simplify_epsilon,
-                        payload.pic_id,
-                        None,
-                        payload.similar_mode,
-                        payload.prompt,
-                    )
-                else:
-                    result = await run_inference_in_thread(
-                        run_multi_similar_object_batch_pipeline,
-                        build_single_positive_sample(reference_image, payload.reference_bnd_points, payload.prompt),
-                        query_images,
-                        payload.top_k,
-                        payload.similarity_threshold,
-                        payload.sam_threshold,
-                        0.45,
-                        payload.polygon_simplify_epsilon,
-                        payload.pic_id,
-                        None,
-                    )
+                result = await run_inference_in_thread(
+                    run_similar_object_batch_pipeline,
+                    reference_image,
+                    query_images,
+                    payload.reference_bnd_points,
+                    payload.top_k,
+                    payload.similarity_threshold,
+                    payload.sam_threshold,
+                    payload.polygon_simplify_epsilon,
+                    payload.pic_id,
+                    None,
+                    payload.similar_mode,
+                    payload.prompt,
+                )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except Exception as exc:
@@ -495,6 +454,8 @@ def register_routes(app: FastAPI) -> None:
                     confidence,
                     polygon_simplify_epsilon,
                     pic_id,
+                    # 页面调试接口需要展示可视化结果图，显式覆盖运行时默认值。
+                    True,
                 )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -566,34 +527,20 @@ def register_routes(app: FastAPI) -> None:
 
         try:
             async with INFERENCE_SEMAPHORE:
-                if is_same_image_mode:
-                    result = await run_inference_in_thread(
-                        run_similar_object_batch_pipeline,
-                        reference_image,
-                        query_images,
-                        parsed_reference_bnd_points,
-                        top_k,
-                        similarity_threshold,
-                        sam_threshold,
-                        polygon_simplify_epsilon,
-                        pic_id,
-                        query_names,
-                        similar_mode,
-                        prompt_text,
-                    )
-                else:
-                    result = await run_inference_in_thread(
-                        run_multi_similar_object_batch_pipeline,
-                        build_single_positive_sample(reference_image, parsed_reference_bnd_points, prompt_text),
-                        query_images,
-                        top_k,
-                        similarity_threshold,
-                        sam_threshold,
-                        0.45,
-                        polygon_simplify_epsilon,
-                        pic_id,
-                        query_names,
-                    )
+                result = await run_inference_in_thread(
+                    run_similar_object_batch_pipeline,
+                    reference_image,
+                    query_images,
+                    parsed_reference_bnd_points,
+                    top_k,
+                    similarity_threshold,
+                    sam_threshold,
+                    polygon_simplify_epsilon,
+                    pic_id,
+                    query_names,
+                    similar_mode,
+                    prompt_text,
+                )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except Exception as exc:
@@ -840,9 +787,9 @@ def register_routes(app: FastAPI) -> None:
     @app.get("/health")
     async def health_check() -> Dict[str, Any]:
         with INFERENCE_STATE_LOCK:
-            active_inferences = ACTIVE_INFERENCE_COUNT
-            last_finished_at = LAST_INFERENCE_FINISHED_AT
-            idle_model_unloaded = IDLE_MODEL_UNLOADED
+            active_inferences = runtime.ACTIVE_INFERENCE_COUNT
+            last_finished_at = runtime.LAST_INFERENCE_FINISHED_AT
+            idle_model_unloaded = runtime.IDLE_MODEL_UNLOADED
 
         idle_seconds = None
         if last_finished_at > 0 and active_inferences == 0:
@@ -851,16 +798,17 @@ def register_routes(app: FastAPI) -> None:
         return {
             "status": "healthy",
             "model": MODEL_LABEL,
-            "device": device,
-            "model_loaded": getattr(predictor, "model", None) is not None,
+            "device": runtime.device,
+            "model_loaded": getattr(runtime.predictor, "model", None) is not None,
             "active_inferences": active_inferences,
             "idle_seconds": idle_seconds,
             "idle_model_unloaded": idle_model_unloaded,
             "max_concurrent_inferences": MAX_CONCURRENT_INFERENCES,
-            "model_access_mode": "serialized" if SERIALIZE_MODEL_ACCESS else "parallel",
-            "backend": "ultralytics",
-            "ultralytics_imgsz": ULTRALYTICS_IMGSZ,
+            "model_access_mode": "serialized",
+            "backend": "tensorrt",
+            "engine_dir": str(runtime.predictor.model_dir),
+            "input_size": [runtime.predictor.target_width, runtime.predictor.target_height],
             "cuda_cleanup_after_request": CUDA_CLEANUP_AFTER_REQUEST,
-            "idle_model_unload_seconds": IDLE_MODEL_UNLOAD_SECONDS,
+            "idle_model_unload_seconds": 0,
             "cuda_memory": get_cuda_memory_stats(),
         }

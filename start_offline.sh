@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
 
 activate_sam3_env() {
-  local env_name="${SAM3_CONDA_ENV:-sam3}"
+  local env_name="${SAM3_CONDA_ENV:-base}"
   local conda_sh=""
 
   if command -v conda >/dev/null 2>&1; then
@@ -37,6 +37,12 @@ activate_sam3_env() {
 
 activate_sam3_env
 
+# Docker 非交互 shell 不读取 ~/.bashrc，需要在启动脚本中显式暴露 CUDA/TRT 动态库。
+export SAM3_CUDA_HOME="${SAM3_CUDA_HOME:-/usr/local/cuda-12.8}"
+export SAM3_TRT_ROOT="${SAM3_TRT_ROOT:-/usr/local/TensorRT-10.8.0.43}"
+export PATH="${SAM3_CUDA_HOME}/bin:${SAM3_TRT_ROOT}/bin:${PATH}"
+export LD_LIBRARY_PATH="${SAM3_TRT_ROOT}/lib:${SAM3_TRT_ROOT}/targets/x86_64-linux-gnu/lib:${SAM3_CUDA_HOME}/lib64${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+
 mkdir -p uploads results static
 export PYTHONPATH="${SCRIPT_DIR}/_vendor${PYTHONPATH:+:${PYTHONPATH}}"
 export MPLCONFIGDIR="${MPLCONFIGDIR:-${SCRIPT_DIR}/.matplotlib}"
@@ -49,35 +55,33 @@ fi
 
 export SAM3_HOST="${SAM3_HOST:-0.0.0.0}"
 export SAM3_PORT="${SAM3_PORT:-8006}"
-if [ -z "${SAM3_CHECKPOINT_PATH:-}" ]; then
-  if [ -f "${SCRIPT_DIR}/weights/sam3.pt" ]; then
-    export SAM3_CHECKPOINT_PATH="${SCRIPT_DIR}/weights/sam3.pt"
-  elif [ -f "${SCRIPT_DIR}/weights/sam3.1_multiplex.pt" ]; then
-    export SAM3_CHECKPOINT_PATH="${SCRIPT_DIR}/weights/sam3.1_multiplex.pt"
-  else
-    echo "ERROR: missing model file. expected one of:"
-    echo "  - weights/sam3.pt (Ultralytics SAM3)"
-    echo "  - weights/sam3.1_multiplex.pt"
-    exit 1
-  fi
-fi
-
-if [ ! -f "${SAM3_CHECKPOINT_PATH}" ]; then
-  echo "ERROR: SAM3_CHECKPOINT_PATH does not exist: ${SAM3_CHECKPOINT_PATH}"
-  exit 1
+if [ -z "${SAM3_TRT_ENGINE_DIR:-}" ]; then
+  # 默认只使用当前程序内置的 TensorRT engine。
+  export SAM3_TRT_ENGINE_DIR="${SCRIPT_DIR}/engines"
 fi
 
 python - <<'PY'
 try:
-    import ultralytics  # noqa: F401
-    from ultralytics.models.sam import SAM3SemanticPredictor  # noqa: F401
+    import cupy  # noqa: F401
+    import tensorrt  # noqa: F401
+    import tokenizers  # noqa: F401
 except Exception as exc:
     raise SystemExit(
-        "ERROR: ultralytics with SAM3 support is required in conda env 'sam3'. "
-        "Run: python -m pip install -U 'ultralytics>=8.4.51'\n"
+        "ERROR: TensorRT/CuPy/tokenizers are required in the current environment.\n"
         f"Import error: {exc}"
     )
 PY
+
+for engine_name in vision-encoder text-encoder geometry-encoder decoder; do
+  if ! find "${SAM3_TRT_ENGINE_DIR}" -maxdepth 1 -type f -name "${engine_name}*.engine" -print -quit | grep -q .; then
+    echo "ERROR: missing ${engine_name} engine in ${SAM3_TRT_ENGINE_DIR}"
+    exit 1
+  fi
+done
+if [ ! -f "${SAM3_TRT_ENGINE_DIR}/tokenizer.json" ]; then
+  echo "ERROR: missing tokenizer.json in ${SAM3_TRT_ENGINE_DIR}"
+  exit 1
+fi
 
 # Offline translation: only load/install local Argos model, no network access.
 export ARGOS_PACKAGES_DIR="${ARGOS_PACKAGES_DIR:-${SCRIPT_DIR}/argos-packages}"
@@ -92,28 +96,19 @@ export SAM3_API_KEYS_FILE="${SAM3_API_KEYS_FILE:-${SCRIPT_DIR}/api_keys.json}"
 
 # Optional runtime tuning.
 export SAM3_MAX_CONCURRENT_INFERENCES="${SAM3_MAX_CONCURRENT_INFERENCES:-4}"
-export SAM3_SERIALIZE_MODEL_ACCESS="${SAM3_SERIALIZE_MODEL_ACCESS:-1}"
-export SAM3_INFER_DTYPE="${SAM3_INFER_DTYPE:-bfloat16}"
-export SAM3_ENABLE_AUTOCAST="${SAM3_ENABLE_AUTOCAST:-1}"
-export SAM3_ULTRALYTICS_IMGSZ="${SAM3_ULTRALYTICS_IMGSZ:-1036}"
-export SAM3_ULTRALYTICS_IOU="${SAM3_ULTRALYTICS_IOU:-0.7}"
+export SAM3_TRT_NMS_IOU="${SAM3_TRT_NMS_IOU:-0.7}"
 export SAM3_CUDA_CLEANUP_AFTER_REQUEST="${SAM3_CUDA_CLEANUP_AFTER_REQUEST:-1}"
-export SAM3_IDLE_MODEL_UNLOAD_SECONDS="${SAM3_IDLE_MODEL_UNLOAD_SECONDS:-0}"
-export SAM3_CUDA_CLEANUP_LOG="${SAM3_CUDA_CLEANUP_LOG:-0}"
 
-echo "Starting Ultralytics SAM3 offline service..."
+echo "Starting SAM3 TensorRT offline service..."
 echo "HOST=${SAM3_HOST} PORT=${SAM3_PORT}"
-echo "CHECKPOINT=${SAM3_CHECKPOINT_PATH}"
+echo "TRT_ENGINE_DIR=${SAM3_TRT_ENGINE_DIR}"
+echo "TRT_ROOT=${SAM3_TRT_ROOT}"
+echo "CUDA_HOME=${SAM3_CUDA_HOME}"
 echo "ARGOS_PACKAGES_DIR=${ARGOS_PACKAGES_DIR}"
 echo "ARGOS_MODEL_DIR=${SAM3_ARGOS_MODEL_DIR}"
 echo "ARGOS_FORCE_OFFLINE=${SAM3_ARGOS_FORCE_OFFLINE}"
-echo "INFER_DTYPE=${SAM3_INFER_DTYPE}"
-echo "ENABLE_AUTOCAST=${SAM3_ENABLE_AUTOCAST}"
-echo "ULTRALYTICS_IMGSZ=${SAM3_ULTRALYTICS_IMGSZ}"
-echo "ULTRALYTICS_IOU=${SAM3_ULTRALYTICS_IOU}"
+echo "TRT_NMS_IOU=${SAM3_TRT_NMS_IOU}"
 echo "CUDA_CLEANUP_AFTER_REQUEST=${SAM3_CUDA_CLEANUP_AFTER_REQUEST}"
-echo "IDLE_MODEL_UNLOAD_SECONDS=${SAM3_IDLE_MODEL_UNLOAD_SECONDS}"
-echo "CUDA_CLEANUP_LOG=${SAM3_CUDA_CLEANUP_LOG}"
 
 export SAM3_PID_FILE="${SAM3_PID_FILE:-${SCRIPT_DIR}/sam3_offline.pid}"
 export SAM3_LOG_FILE="${SAM3_LOG_FILE:-${SCRIPT_DIR}/start_offline.log}"

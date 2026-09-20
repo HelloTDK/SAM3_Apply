@@ -1,6 +1,6 @@
 # SAM3 FastAPI AI图像分割服务 全知识点汇总文档
 ## 项目简介
-基于FastAPI + SAM/Ultralytics 实现的图像检测、分割、相似目标检索推理服务；
+基于 FastAPI + SAM3 TensorRT 实现的图像检测、分割、相似目标检索推理服务；
 支持Base64 JSON调用、前端文件上传、远程URL批量异步任务、两级API密钥鉴权、CUDA显存自动管理、并发限流。
 
 # 一、Python 基础核心知识点
@@ -52,7 +52,7 @@
 3. 全局变量 `ACTIVE_INFERENCE_COUNT` 实时统计运行中推理请求
 
 ## 7. 模块化分包设计
-- 相对导入分包拆分职责：auth鉴权、config常量、image_utils图像工具、runtime模型推理、schemas请求模型、url_tasks异步任务
+- 相对导入分包拆分职责：auth鉴权、config常量、image_utils图像工具、trt_runtime模型推理、schemas请求模型、url_tasks异步任务
 - 单一职责函数 `register_routes(app)` 统一注册全部接口，解耦应用启动与路由代码
 
 # 二、FastAPI 全套核心知识点
@@ -137,21 +137,20 @@ XSS防御：HTML页面渲染时全部字段使用`html.escape()`转义，防止�
 4. DELETE /tasks/{task_id} 主动终止未完成任务
 核心：TASK_REGISTRY 全局任务注册表，解耦即时推理与批量长任务
 
-# 四、AI图像推理 & CUDA GPU 工程知识点
+# 四、AI图像推理、TensorRT 与 CUDA GPU 工程知识点
 ## 1. 全局单例模型架构
-- predictor全局单例加载SAM/Ultralytics大模型，避免重复加载权重消耗显存
-- MODEL_LOCK串行锁，多请求互斥访问模型，防止图片/特征缓存互相覆盖
+- predictor 全局单例加载 vision/text/geometry/decoder 四个 TensorRT engine，避免重复反序列化和显存占用
+- 每个 execution context 自带线程锁，pipeline 另用 MODEL_LOCK 串行组合推理，防止动态 shape 和显存地址被并发改写
 
 ## 2. 三层并发限流机制
 1. 信号量INFERENCE_SEMAPHORE：限制全局最大并发推理MAX_CONCURRENT_INFERENCES
-2. 模型串行锁SERIALIZE_MODEL_ACCESS：多请求互斥使用模型
+2. TensorRT context 锁：多请求互斥使用共享 execution context
 3. 全局计数器ACTIVE_INFERENCE_COUNT：健康接口实时暴露并发指标
 
 ## 3. GPU显存自动回收策略
-1. IDLE_MODEL_UNLOAD_SECONDS：模型空闲超时自动卸载释放显存
-2. CUDA_CLEANUP_AFTER_REQUEST：单次推理完成清空CUDA缓存
-3. 健康接口输出显存占用，监控显存泄漏问题
-4. IDLE_MODEL_UNLOADED标记记录模型卸载状态
+1. CUDA_CLEANUP_AFTER_REQUEST：单次推理完成后释放 CuPy 内存池中的空闲块
+2. 健康接口通过 CUDA runtime 输出总显存、空闲显存和 CuPy 内存池占用
+3. engine 常驻显存，避免空闲卸载后再次反序列化造成请求长延迟
 
 ## 4. 多场景推理流水线封装
 1. run_detection_pipeline：文本prompt通用目标检测分割

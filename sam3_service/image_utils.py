@@ -12,7 +12,6 @@ import matplotlib.font_manager as fm
 import matplotlib.patches as patches
 import matplotlib.pyplot as plt
 import numpy as np
-import torch
 from PIL import Image
 
 from .config import MAX_IMAGE_BYTES, RESULT_DIR, UPLOAD_DIR
@@ -47,12 +46,9 @@ def setup_chinese_font() -> str:
 CURRENT_FONT = setup_chinese_font()
 
 def to_numpy(value: Any) -> np.ndarray:
-    if torch.is_tensor(value):
-        tensor = value.detach().cpu()
-        # NumPy has no native bfloat16 dtype in many runtime stacks.
-        if tensor.dtype == torch.bfloat16:
-            tensor = tensor.to(torch.float32)
-        return tensor.numpy()
+    """把 NumPy/CuPy 等数组统一转为 NumPy，不再依赖 PyTorch。"""
+    if hasattr(value, "get"):
+        return np.asarray(value.get())
     return np.asarray(value)
 
 

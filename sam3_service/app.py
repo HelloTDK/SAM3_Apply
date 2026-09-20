@@ -11,7 +11,7 @@ from .routes import register_routes
 def create_app() -> FastAPI:
     app = FastAPI(
         title="SAM3 OpenAI-style Segmentation API",
-        description="HTTP service for SAM3 image segmentation with API key authentication.",
+        description="TensorRT HTTP service for SAM3 image segmentation with API key authentication.",
         version="2.0.0",
     )
 

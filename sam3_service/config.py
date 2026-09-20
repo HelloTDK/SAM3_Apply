@@ -26,48 +26,19 @@ def _env_bool(name: str, default: str) -> bool:
     return os.getenv(name, default).lower() in {"1", "true", "yes", "on"}
 
 
-def _resolve_default_checkpoint_path() -> Path:
-    weights_dir = ROOT_DIR / "weights"
-    candidates = [
-        weights_dir / "sam3.pt",
-        weights_dir / "sam3.1_multiplex.pt",
-    ]
-    for one_path in candidates:
-        if one_path.exists():
-            return one_path
-    return candidates[0]
-
-
-DEFAULT_CHECKPOINT_PATH = _resolve_default_checkpoint_path()
-CHECKPOINT_PATH = Path(os.getenv("SAM3_CHECKPOINT_PATH", str(DEFAULT_CHECKPOINT_PATH)))
+# 默认只读取程序自身携带的 engine，避免部署时依赖仓库中的其他目录。
+DEFAULT_ENGINE_DIR = ROOT_DIR / "engines"
+TRT_ENGINE_DIR = Path(os.getenv("SAM3_TRT_ENGINE_DIR", str(DEFAULT_ENGINE_DIR)))
 MAX_IMAGE_BYTES = int(os.getenv("SAM3_MAX_IMAGE_BYTES", str(20 * 1024 * 1024)))
 SAVE_UPLOADS = _env_bool("SAM3_SAVE_UPLOADS", "1")
 MAX_CONCURRENT_INFERENCES = max(1, int(os.getenv("SAM3_MAX_CONCURRENT_INFERENCES", "4")))
-SERIALIZE_MODEL_ACCESS = _env_bool("SAM3_SERIALIZE_MODEL_ACCESS", "1")
-EMPTY_CUDA_CACHE_EACH_REQUEST = _env_bool("SAM3_EMPTY_CUDA_CACHE_EACH_REQUEST", "0")
 CUDA_CLEANUP_AFTER_REQUEST = _env_bool("SAM3_CUDA_CLEANUP_AFTER_REQUEST", "1")
-IDLE_MODEL_UNLOAD_SECONDS = int(os.getenv("SAM3_IDLE_MODEL_UNLOAD_SECONDS", "0"))
-CUDA_CLEANUP_LOG = _env_bool("SAM3_CUDA_CLEANUP_LOG", "0")
-# 仅在排查样例标注重框时输出最终 NMS 过程，默认关闭以避免生产日志膨胀。
-NMS_DEBUG = _env_bool("SAM3_NMS_DEBUG", "0")
-INFER_DTYPE_STR = (os.getenv("SAM3_INFER_DTYPE", "bfloat16") or "bfloat16").strip().lower()
-ENABLE_AUTOCAST = _env_bool("SAM3_ENABLE_AUTOCAST", "1")
-ULTRALYTICS_IMGSZ = int(os.getenv("SAM3_ULTRALYTICS_IMGSZ", "1036"))
-ULTRALYTICS_IOU = float(os.getenv("SAM3_ULTRALYTICS_IOU", "0.7"))
-ULTRALYTICS_VERBOSE = _env_bool("SAM3_ULTRALYTICS_VERBOSE", "0")
+TRT_NMS_IOU = float(os.getenv("SAM3_TRT_NMS_IOU", "0.7"))
 VISUAL_PROMPT_MAX_CANDIDATES = max(1, int(os.getenv("SAM3_VISUAL_PROMPT_MAX_CANDIDATES", "32")))
 SIMILAR_MODES = {"feature_match", "same_image_prompt"}
-MULTI_NEGATIVE_FILTER_IOU = float(os.getenv("SAM3_MULTI_NEGATIVE_FILTER_IOU", "0.1"))
 
 
-def _infer_model_label(checkpoint_path: Path) -> str:
-    lowered_name = checkpoint_path.name.lower()
-    if "sam3.1" in lowered_name or "multiplex" in lowered_name:
-        return "ultralytics-sam3.1"
-    return "ultralytics-sam3"
-
-
-MODEL_LABEL = (os.getenv("SAM3_MODEL_LABEL", "") or "").strip() or _infer_model_label(CHECKPOINT_PATH)
+MODEL_LABEL = (os.getenv("SAM3_MODEL_LABEL", "") or "").strip() or "sam3-tensorrt"
 
 # Runtime outputs are written to these folders and static mounting checks them.
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
