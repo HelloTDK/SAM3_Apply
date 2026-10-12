@@ -35,48 +35,60 @@ activate_sam3_env() {
   conda activate "${env_name}"
 }
 
-activate_sam3_env
+export SAM3_BACKEND="${SAM3_BACKEND:-om}"
+if [ "${SAM3_BACKEND}" = "om" ]; then
+  export ARGOS_DEVICE_TYPE="cpu"
+  if [ -z "${SAM3_PYTHON:-}" ] && [ -x /opt/python310_venv/bin/python ]; then
+    SAM3_PYTHON=/opt/python310_venv/bin/python
+  fi
+else
+  activate_sam3_env
+fi
+SAM3_PYTHON="${SAM3_PYTHON:-python}"
 
 mkdir -p uploads results static
 export PYTHONPATH="${SCRIPT_DIR}/_vendor${PYTHONPATH:+:${PYTHONPATH}}"
 export MPLCONFIGDIR="${MPLCONFIGDIR:-${SCRIPT_DIR}/.matplotlib}"
 mkdir -p "${MPLCONFIGDIR}"
 
-if [ ! -f "argos_models/translate-zh_en-1_9.argosmodel" ]; then
+if [ "${SAM3_BACKEND}" != "om" ] && [ ! -f "argos_models/translate-zh_en-1_9.argosmodel" ]; then
   echo "ERROR: missing translation model argos_models/translate-zh_en-1_9.argosmodel"
   exit 1
 fi
 
 export SAM3_HOST="${SAM3_HOST:-0.0.0.0}"
 export SAM3_PORT="${SAM3_PORT:-8006}"
-if [ -z "${SAM3_CHECKPOINT_PATH:-}" ]; then
-  if [ -f "${SCRIPT_DIR}/weights/sam3.pt" ]; then
-    export SAM3_CHECKPOINT_PATH="${SCRIPT_DIR}/weights/sam3.pt"
-  elif [ -f "${SCRIPT_DIR}/weights/sam3.1_multiplex.pt" ]; then
-    export SAM3_CHECKPOINT_PATH="${SCRIPT_DIR}/weights/sam3.1_multiplex.pt"
-  else
-    echo "ERROR: missing model file. expected one of:"
-    echo "  - weights/sam3.pt (Ultralytics SAM3)"
-    echo "  - weights/sam3.1_multiplex.pt"
+if [ "${SAM3_BACKEND}" != "om" ]; then
+  if [ -z "${SAM3_CHECKPOINT_PATH:-}" ]; then
+    if [ -f "${SCRIPT_DIR}/weights/sam3.pt" ]; then
+      export SAM3_CHECKPOINT_PATH="${SCRIPT_DIR}/weights/sam3.pt"
+    elif [ -f "${SCRIPT_DIR}/weights/sam3.1_multiplex.pt" ]; then
+      export SAM3_CHECKPOINT_PATH="${SCRIPT_DIR}/weights/sam3.1_multiplex.pt"
+    else
+      echo "ERROR: missing model file. expected one of:"
+      echo "  - weights/sam3.pt (Ultralytics SAM3)"
+      echo "  - weights/sam3.1_multiplex.pt"
+      exit 1
+    fi
+  fi
+
+  if [ ! -f "${SAM3_CHECKPOINT_PATH}" ]; then
+    echo "ERROR: SAM3_CHECKPOINT_PATH does not exist: ${SAM3_CHECKPOINT_PATH}"
     exit 1
   fi
+
 fi
 
-if [ ! -f "${SAM3_CHECKPOINT_PATH}" ]; then
-  echo "ERROR: SAM3_CHECKPOINT_PATH does not exist: ${SAM3_CHECKPOINT_PATH}"
-  exit 1
-fi
-
-python - <<'PY'
-try:
-    import ultralytics  # noqa: F401
-    from ultralytics.models.sam import SAM3SemanticPredictor  # noqa: F401
-except Exception as exc:
-    raise SystemExit(
-        "ERROR: ultralytics with SAM3 support is required in conda env 'sam3'. "
-        "Run: python -m pip install -U 'ultralytics>=8.4.51'\n"
-        f"Import error: {exc}"
-    )
+"${SAM3_PYTHON}" - <<'PY'
+import os
+from importlib import import_module
+modules = ["fastapi", "uvicorn", "multipart", "cv2", "matplotlib", "requests"]
+modules += ["acl", "tokenizers"] if os.getenv("SAM3_BACKEND") == "om" else ["ultralytics.models.sam"]
+for name in modules:
+    try:
+        import_module(name)
+    except ImportError as exc:
+        raise SystemExit(f"ERROR: missing service dependency {name}: {exc}") from exc
 PY
 
 # Offline translation: only load/install local Argos model, no network access.
@@ -101,9 +113,10 @@ export SAM3_CUDA_CLEANUP_AFTER_REQUEST="${SAM3_CUDA_CLEANUP_AFTER_REQUEST:-1}"
 export SAM3_IDLE_MODEL_UNLOAD_SECONDS="${SAM3_IDLE_MODEL_UNLOAD_SECONDS:-0}"
 export SAM3_CUDA_CLEANUP_LOG="${SAM3_CUDA_CLEANUP_LOG:-0}"
 
-echo "Starting Ultralytics SAM3 offline service..."
+echo "Starting SAM3 offline service (backend=${SAM3_BACKEND})..."
 echo "HOST=${SAM3_HOST} PORT=${SAM3_PORT}"
-echo "CHECKPOINT=${SAM3_CHECKPOINT_PATH}"
+echo "PYTHON=${SAM3_PYTHON} ARGOS_DEVICE_TYPE=${ARGOS_DEVICE_TYPE:-auto}"
+echo "CHECKPOINT=${SAM3_CHECKPOINT_PATH:-} OM_MODEL_DIR=${SAM3_OM_MODEL_DIR:-${SCRIPT_DIR}/om_weights}"
 echo "ARGOS_PACKAGES_DIR=${ARGOS_PACKAGES_DIR}"
 echo "ARGOS_MODEL_DIR=${SAM3_ARGOS_MODEL_DIR}"
 echo "ARGOS_FORCE_OFFLINE=${SAM3_ARGOS_FORCE_OFFLINE}"
@@ -121,7 +134,7 @@ export SAM3_FOREGROUND="${SAM3_FOREGROUND:-0}"
 
 if [ "${SAM3_FOREGROUND}" = "1" ]; then
   echo "Running in foreground mode."
-  exec python sam_app.py
+  exec "${SAM3_PYTHON}" sam_app.py
 fi
 
 if [ -f "${SAM3_PID_FILE}" ]; then
@@ -140,7 +153,7 @@ echo "Running in background mode."
 echo "PID_FILE=${SAM3_PID_FILE}"
 echo "LOG_FILE=${SAM3_LOG_FILE}"
 printf '\n[%s] Starting SAM3 offline service\n' "$(date '+%Y-%m-%d %H:%M:%S')" >> "${SAM3_LOG_FILE}"
-nohup python sam_app.py >> "${SAM3_LOG_FILE}" 2>&1 &
+nohup "${SAM3_PYTHON}" sam_app.py >> "${SAM3_LOG_FILE}" 2>&1 &
 new_pid="$!"
 echo "${new_pid}" > "${SAM3_PID_FILE}"
 

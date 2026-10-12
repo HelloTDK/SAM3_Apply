@@ -1,0 +1,14 @@
+# 原 PT 后端依赖；torch/torchvision 的构建由目标 CUDA 或 CPU 环境选择。
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+python-multipart==0.0.6
+pillow==10.1.0
+matplotlib==3.8.2
+numpy==1.26.2
+torch>=2.0.0
+opencv-python-headless>=4.8.0
+iopath>=0.1.10
+ultralytics>=8.4.51
+openai-clip>=1.0.1
+requests>=2.31
+argostranslate>=1.9.0

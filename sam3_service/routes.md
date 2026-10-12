@@ -137,7 +137,16 @@ XSS防御：HTML页面渲染时全部字段使用`html.escape()`转义，防止�
 4. DELETE /tasks/{task_id} 主动终止未完成任务
 核心：TASK_REGISTRY 全局任务注册表，解耦即时推理与批量长任务
 
-# 四、AI图像推理 & CUDA GPU 工程知识点
+# 四、AI图像推理 & GPU/NPU 工程知识点
+
+当前分支默认 `SAM3_BACKEND=om`。`runtime.py` 继续复用所有文本/框/样例/URL 业务
+pipeline；`om_backend.py` 负责 OM 图像、文本、几何特征与三个 decoder 的选择，
+`acl_runtime.py` 负责 ACL context、模型描述、输入校验、缓冲区执行和释放。
+生产服务不依赖 `tools/`，OM 推理不导入 PyTorch/Ultralytics。
+固定几何输入的补齐方法和单类别 51 个视觉 token 限制见 `API_DOC.md`。
+OM 强制模型锁，并在工作线程中绑定 ACL context；空闲卸载释放权重，下次访问重载，
+服务退出释放 context。`/health` 从 runtime 实时读取计数和卸载状态。
+
 ## 1. 全局单例模型架构
 - predictor全局单例加载SAM/Ultralytics大模型，避免重复加载权重消耗显存
 - MODEL_LOCK串行锁，多请求互斥访问模型，防止图片/特征缓存互相覆盖

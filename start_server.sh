@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-# SAM3 Web Service Startup Script (Conda)
+# SAM3 Web Service Startup Script (Ascend OM / Ultralytics)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
@@ -9,24 +9,34 @@ cd "${SCRIPT_DIR}"
 echo "Starting SAM3 Detection Web Service..."
 echo "======================================="
 
-# Initialize conda and activate the target environment.
-if command -v conda >/dev/null 2>&1; then
-    CONDA_BASE="$(conda info --base 2>/dev/null)"
-    # shellcheck source=/dev/null
-    source "${CONDA_BASE}/etc/profile.d/conda.sh"
-elif [ -f "/root/miniconda3/etc/profile.d/conda.sh" ]; then
-    # shellcheck source=/dev/null
-    source "/root/miniconda3/etc/profile.d/conda.sh"
-elif [ -f "/expdata/miniconda/etc/profile.d/conda.sh" ]; then
-    # shellcheck source=/dev/null
-    source "/expdata/miniconda/etc/profile.d/conda.sh"
+export SAM3_BACKEND="${SAM3_BACKEND:-om}"
+if [ "${SAM3_BACKEND}" = "om" ]; then
+  export ARGOS_DEVICE_TYPE="cpu"
+  if [ -z "${SAM3_PYTHON:-}" ] && [ -x /opt/python310_venv/bin/python ]; then
+    SAM3_PYTHON=/opt/python310_venv/bin/python
+  fi
 else
-    echo "ERROR: conda.sh not found. Please install conda or adjust this script."
-    exit 1
-fi
+  # Initialize conda and activate the target environment.
+  if command -v conda >/dev/null 2>&1; then
+      CONDA_BASE="$(conda info --base 2>/dev/null)"
+      # shellcheck source=/dev/null
+      source "${CONDA_BASE}/etc/profile.d/conda.sh"
+  elif [ -f "/root/miniconda3/etc/profile.d/conda.sh" ]; then
+      # shellcheck source=/dev/null
+      source "/root/miniconda3/etc/profile.d/conda.sh"
+  elif [ -f "/expdata/miniconda/etc/profile.d/conda.sh" ]; then
+      # shellcheck source=/dev/null
+      source "/expdata/miniconda/etc/profile.d/conda.sh"
+  else
+      echo "ERROR: conda.sh not found. Please install conda or adjust this script."
+      exit 1
+  fi
 
-echo "Activating conda env: sam3"
-conda activate sam3
+  echo "Activating conda env: sam3"
+  conda activate sam3
+
+fi
+SAM3_PYTHON="${SAM3_PYTHON:-python}"
 
 # Create necessary directories
 mkdir -p uploads results static
@@ -34,26 +44,20 @@ export PYTHONPATH="${SCRIPT_DIR}/_vendor${PYTHONPATH:+:${PYTHONPATH}}"
 export MPLCONFIGDIR="${MPLCONFIGDIR:-${SCRIPT_DIR}/.matplotlib}"
 mkdir -p "${MPLCONFIGDIR}"
 
-# Check if model exists
-if [ ! -f "weights/sam3.pt" ]; then
-    echo "ERROR: Model file 'weights/sam3.pt' not found."
-    exit 1
-fi
-
-python - <<'PY'
-try:
-    import ultralytics  # noqa: F401
-    from ultralytics.models.sam import SAM3SemanticPredictor  # noqa: F401
-except Exception as exc:
-    raise SystemExit(
-        "ERROR: ultralytics with SAM3 support is required in conda env 'sam3'. "
-        "Run: python -m pip install -U 'ultralytics>=8.4.51'\n"
-        f"Import error: {exc}"
-    )
+"${SAM3_PYTHON}" - <<'PY'
+import os
+from importlib import import_module
+modules = ["fastapi", "uvicorn", "multipart", "cv2", "matplotlib", "requests"]
+modules += ["acl", "tokenizers"] if os.getenv("SAM3_BACKEND") == "om" else ["ultralytics.models.sam"]
+for name in modules:
+    try:
+        import_module(name)
+    except ImportError as exc:
+        raise SystemExit(f"ERROR: missing service dependency {name}: {exc}") from exc
 PY
 
-export SAM3_HOST="0.0.0.0"
-export SAM3_PORT="8006"
+export SAM3_HOST="${SAM3_HOST:-0.0.0.0}"
+export SAM3_PORT="${SAM3_PORT:-8006}"
 
 # Force Argos translation to run fully offline in Docker.
 # These defaults can still be overridden from the shell before running this script.
@@ -76,6 +80,8 @@ fi
 echo "======================================="
 echo "Server URL: http://localhost:${SAM3_PORT}"
 echo "OpenAPI docs: http://localhost:${SAM3_PORT}/docs"
+echo "BACKEND=${SAM3_BACKEND} PYTHON=${SAM3_PYTHON}"
+echo "ARGOS_DEVICE_TYPE=${ARGOS_DEVICE_TYPE:-auto}"
 echo "ARGOS_PACKAGES_DIR=${ARGOS_PACKAGES_DIR}"
 echo "SAM3_ARGOS_MODEL_DIR=${SAM3_ARGOS_MODEL_DIR}"
 echo "SAM3_ARGOS_AUTO_INSTALL=${SAM3_ARGOS_AUTO_INSTALL}"
@@ -88,4 +94,4 @@ if [ -n "${STANZA_RESOURCES_DIR:-}" ]; then
 fi
 echo "======================================="
 
-exec python sam_app.py
+exec "${SAM3_PYTHON}" sam_app.py

@@ -2,6 +2,30 @@
 
 服务地址示例：`http://192.168.100.25:8006`
 
+当前分支默认使用 Ascend OM 推理（`SAM3_BACKEND=om`），响应中的 `model` 默认是
+`ascend-sam3-om`。以下示例中的 `ultralytics-sam3` 是旧后端的模型标识；接口路径、
+请求字段、响应结构和原图像素坐标约定保持一致。设置 `SAM3_BACKEND=ultralytics`
+可继续使用原来的 PT 后端。
+
+OM 支持文本、单/多框、跨图/同图样例、多类别正负样例、URL 图片标注、异步图片/
+视频任务和可视化。`/health` 返回 `backend: "om"`、`device: "npu:0"` 和
+`om_imgsz: 1008`；旧的 `ultralytics_imgsz` 仅对 PT 后端有意义，`cuda_memory` 在 OM
+下为 `null`。OM 强制串行访问共享模型，空闲卸载会释放 OM 权重，下次请求自动重载。
+
+当前 OM 文件的限制：文本最多 32 个 token（含特殊 token）；geometry encoder 固定
+接收 50 个框，文本/几何/混合 decoder 分别接收 32/51/83 个 token。单类别合并后的
+视觉提示上限为 51 个有效 token，包含每个样例来源组的 CLS token；正负来源组分别
+计数。超过上限会返回明确的输入错误（同步 HTTP 接口为 400，异步任务按原有错误
+格式返回），不会静默丢弃样例。普通多框分割可按 50 框一组执行。
+
+geometry OM 未提供框补齐 mask 输入，服务通过重复有效框补齐，再保留实际框和 CLS
+输出供 decoder 使用。该方式已做真实 NPU 接口验证，但不能保证与动态 PT 模型的
+注意力结果完全一致；需要精确等价或更大样例容量时，应重新导出支持框 mask 和
+更长提示的 OM。中文翻译仍使用原有 Argos 流程，需要安装翻译依赖并准备本地模型。
+OM 模式在导入 Argos 前固定 `ARGOS_DEVICE_TYPE=cpu`，中文翻译使用 CPU，图像推理
+使用 Ascend NPU；`requirements.txt` / `requirements-om.txt` 固定 CPU torch 以满足
+Stanza 依赖，无需安装 CUDA。缺少本地翻译模型时仍按原逻辑使用原始提示词。
+
 本文档只覆盖当前常用的四类能力：
 
 - prompt 文本识别：按文本类别找目标。

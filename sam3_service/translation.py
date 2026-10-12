@@ -15,7 +15,8 @@ try:
     import argostranslate.translate as argos_translate
 
     ARGOS_AVAILABLE = True
-except Exception:
+except Exception as exc:
+    print(f"Argos 翻译依赖导入失败，中文提示暂时无法翻译：{exc}")
     argos_package = None
     argos_translate = None
     ARGOS_AVAILABLE = False
@@ -389,6 +390,10 @@ if ARGOS_AVAILABLE:
             f"Translation package {ARGOS_SOURCE_CODE}->{ARGOS_TARGET_CODE} not ready at startup; "
             "will retry during requests"
         )
+        print(
+            "中文翻译模型尚未就绪；requirements 只安装依赖，不包含翻译模型。"
+            "请使用服务的 Python 执行 prepare_translation.py 准备本地模型。"
+        )
         if ARGOS_AUTO_INSTALL:
             print("Argos auto-install is enabled")
         if ARGOS_MODEL_PATH:
@@ -437,6 +442,7 @@ def translate_to_english(text: str) -> str:
         translated = _normalize_prompt_label(translated).lower()
         if not translated or contains_chinese(translated):
             return normalized_text
+        translation_available = True
         return translated
     except Exception as exc:
         translated_offline = _translate_with_argos_model_offline(normalized_text)

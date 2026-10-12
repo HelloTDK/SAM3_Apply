@@ -3,6 +3,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
+export SAM3_BACKEND="ultralytics"
+SAM3_PYTHON="${SAM3_PYTHON:-python}"
 
 mkdir -p uploads results static
 export PYTHONPATH="${SCRIPT_DIR}/_vendor${PYTHONPATH:+:${PYTHONPATH}}"
@@ -30,7 +32,7 @@ if [ ! -f "${SAM3_CHECKPOINT_PATH}" ]; then
   exit 1
 fi
 
-python - <<'PY'
+"${SAM3_PYTHON}" - <<'PY'
 try:
     import ultralytics  # noqa: F401
     from ultralytics.models.sam import SAM3SemanticPredictor  # noqa: F401
@@ -86,4 +88,4 @@ echo "ARGOS_PACKAGES_DIR=${ARGOS_PACKAGES_DIR}"
 echo "ARGOS_MODEL_DIR=${SAM3_ARGOS_MODEL_DIR}"
 echo "ARGOS_FORCE_OFFLINE=${SAM3_ARGOS_FORCE_OFFLINE}"
 
-exec python sam_app.py
+exec "${SAM3_PYTHON}" sam_app.py

@@ -13,7 +13,9 @@ from fastapi.routing import APIRoute
 from PIL import Image
 
 from .auth import api_key_manager, require_admin_key, require_api_key
+from . import runtime
 from .config import (
+    BACKEND,
     CUDA_CLEANUP_AFTER_REQUEST,
     IDLE_MODEL_UNLOAD_SECONDS,
     MAX_CONCURRENT_INFERENCES,
@@ -26,11 +28,8 @@ from .config import (
 )
 from .image_utils import decode_base64_image, parse_optional_bnd_points_text, save_upload_image
 from .runtime import (
-    ACTIVE_INFERENCE_COUNT,
-    IDLE_MODEL_UNLOADED,
     INFERENCE_SEMAPHORE,
     INFERENCE_STATE_LOCK,
-    LAST_INFERENCE_FINISHED_AT,
     device,
     get_cuda_memory_stats,
     predictor,
@@ -840,9 +839,9 @@ def register_routes(app: FastAPI) -> None:
     @app.get("/health")
     async def health_check() -> Dict[str, Any]:
         with INFERENCE_STATE_LOCK:
-            active_inferences = ACTIVE_INFERENCE_COUNT
-            last_finished_at = LAST_INFERENCE_FINISHED_AT
-            idle_model_unloaded = IDLE_MODEL_UNLOADED
+            active_inferences = runtime.ACTIVE_INFERENCE_COUNT
+            last_finished_at = runtime.LAST_INFERENCE_FINISHED_AT
+            idle_model_unloaded = runtime.IDLE_MODEL_UNLOADED
 
         idle_seconds = None
         if last_finished_at > 0 and active_inferences == 0:
@@ -858,7 +857,8 @@ def register_routes(app: FastAPI) -> None:
             "idle_model_unloaded": idle_model_unloaded,
             "max_concurrent_inferences": MAX_CONCURRENT_INFERENCES,
             "model_access_mode": "serialized" if SERIALIZE_MODEL_ACCESS else "parallel",
-            "backend": "ultralytics",
+            "backend": BACKEND,
+            "om_imgsz": predictor.imgsz if BACKEND == "om" else None,
             "ultralytics_imgsz": ULTRALYTICS_IMGSZ,
             "cuda_cleanup_after_request": CUDA_CLEANUP_AFTER_REQUEST,
             "idle_model_unload_seconds": IDLE_MODEL_UNLOAD_SECONDS,

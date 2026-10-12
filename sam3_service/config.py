@@ -40,10 +40,18 @@ def _resolve_default_checkpoint_path() -> Path:
 
 DEFAULT_CHECKPOINT_PATH = _resolve_default_checkpoint_path()
 CHECKPOINT_PATH = Path(os.getenv("SAM3_CHECKPOINT_PATH", str(DEFAULT_CHECKPOINT_PATH)))
+BACKEND = os.getenv("SAM3_BACKEND", "om").strip().lower()
+if BACKEND not in {"om", "ultralytics"}:
+    raise ValueError("SAM3_BACKEND must be 'om' or 'ultralytics'")
+if BACKEND == "om":
+    # Argos 在导入时读取设备配置；OM 模式的翻译始终使用 CPU。
+    os.environ["ARGOS_DEVICE_TYPE"] = "cpu"
+OM_MODEL_DIR = Path(os.getenv("SAM3_OM_MODEL_DIR", str(ROOT_DIR / "om_weights")))
+OM_DEVICE_ID = int(os.getenv("SAM3_OM_DEVICE_ID", "0"))
 MAX_IMAGE_BYTES = int(os.getenv("SAM3_MAX_IMAGE_BYTES", str(20 * 1024 * 1024)))
 SAVE_UPLOADS = _env_bool("SAM3_SAVE_UPLOADS", "1")
 MAX_CONCURRENT_INFERENCES = max(1, int(os.getenv("SAM3_MAX_CONCURRENT_INFERENCES", "4")))
-SERIALIZE_MODEL_ACCESS = _env_bool("SAM3_SERIALIZE_MODEL_ACCESS", "1")
+SERIALIZE_MODEL_ACCESS = BACKEND == "om" or _env_bool("SAM3_SERIALIZE_MODEL_ACCESS", "1")
 EMPTY_CUDA_CACHE_EACH_REQUEST = _env_bool("SAM3_EMPTY_CUDA_CACHE_EACH_REQUEST", "0")
 CUDA_CLEANUP_AFTER_REQUEST = _env_bool("SAM3_CUDA_CLEANUP_AFTER_REQUEST", "1")
 IDLE_MODEL_UNLOAD_SECONDS = int(os.getenv("SAM3_IDLE_MODEL_UNLOAD_SECONDS", "0"))
@@ -67,7 +75,9 @@ def _infer_model_label(checkpoint_path: Path) -> str:
     return "ultralytics-sam3"
 
 
-MODEL_LABEL = (os.getenv("SAM3_MODEL_LABEL", "") or "").strip() or _infer_model_label(CHECKPOINT_PATH)
+MODEL_LABEL = (os.getenv("SAM3_MODEL_LABEL", "") or "").strip() or (
+    "ascend-sam3-om" if BACKEND == "om" else _infer_model_label(CHECKPOINT_PATH)
+)
 
 # Runtime outputs are written to these folders and static mounting checks them.
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)

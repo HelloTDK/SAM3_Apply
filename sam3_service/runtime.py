@@ -4,6 +4,8 @@
 工具放在更轻量的模块里，避免路由/auth 代码导入时意外触发模型加载。
 """
 
+from __future__ import annotations
+
 import asyncio
 import contextlib
 import gc
@@ -16,11 +18,12 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import cv2
 import numpy as np
-import torch
-import torch.nn.functional as F
 from PIL import Image
 
 from .config import (
+    BACKEND,
+    OM_DEVICE_ID,
+    OM_MODEL_DIR,
     CHECKPOINT_PATH,
     CUDA_CLEANUP_AFTER_REQUEST,
     CUDA_CLEANUP_LOG,
@@ -54,6 +57,11 @@ from .image_utils import (
     to_numpy,
     visualize_results,
 )
+
+
+if BACKEND == "ultralytics":
+    import torch
+    import torch.nn.functional as F
 
 
 LOGGER = logging.getLogger(__name__)
@@ -94,6 +102,8 @@ def _resolve_infer_dtype(device_name: str, requested: str) -> torch.dtype:
 
 def _inference_autocast_context():
     """根据设备和配置创建 autocast 上下文；不满足条件时返回空上下文。"""
+    if BACKEND == "om":
+        return contextlib.nullcontext()
     use_autocast = (
         ENABLE_AUTOCAST
         and torch.cuda.is_available()
@@ -123,48 +133,56 @@ def _patch_openai_clip_tokenizer() -> None:
     tokenizer_cls.__call__ = _call
 
 
-device = os.getenv("SAM3_DEVICE", "") or ("cuda:0" if torch.cuda.is_available() else "cpu")
-os.environ.setdefault("ARGOS_DEVICE_TYPE", "cuda" if "cuda" in device else "cpu")
-MODEL_DTYPE = _resolve_infer_dtype(device, INFER_DTYPE_STR)
+if BACKEND == "om":
+    from .om_backend import OMBackend
 
-print("Loading SAM3 model...")
-print(f"Using device: {device}")
-print(f"Checkpoint: {CHECKPOINT_PATH}")
-print(f"Model label: {MODEL_LABEL}")
-print(f"Inference dtype: {MODEL_DTYPE}")
-print(f"Autocast enabled: {ENABLE_AUTOCAST}")
-print(f"Ultralytics image size: {ULTRALYTICS_IMGSZ}")
-print(f"Ultralytics NMS IoU: {ULTRALYTICS_IOU}")
+    device = f"npu:{OM_DEVICE_ID}"
+    MODEL_DTYPE = None
+    print(f"加载 SAM3 OM 模型: {OM_MODEL_DIR}, device={device}")
+    predictor = OMBackend(OM_MODEL_DIR, OM_DEVICE_ID, ULTRALYTICS_IOU)
+else:
+    device = os.getenv("SAM3_DEVICE", "") or ("cuda:0" if torch.cuda.is_available() else "cpu")
+    os.environ.setdefault("ARGOS_DEVICE_TYPE", "cuda" if "cuda" in device else "cpu")
+    MODEL_DTYPE = _resolve_infer_dtype(device, INFER_DTYPE_STR)
 
-if not CHECKPOINT_PATH.exists():
-    raise FileNotFoundError(f"Model checkpoint not found: {CHECKPOINT_PATH}")
+    print("Loading SAM3 model...")
+    print(f"Using device: {device}")
+    print(f"Checkpoint: {CHECKPOINT_PATH}")
+    print(f"Model label: {MODEL_LABEL}")
+    print(f"Inference dtype: {MODEL_DTYPE}")
+    print(f"Autocast enabled: {ENABLE_AUTOCAST}")
+    print(f"Ultralytics image size: {ULTRALYTICS_IMGSZ}")
+    print(f"Ultralytics NMS IoU: {ULTRALYTICS_IOU}")
 
-try:
-    from ultralytics.models.sam import SAM3SemanticPredictor
-except Exception as exc:
-    raise RuntimeError(
-        "Ultralytics with SAM3 support is required. Install it in the sam3 conda environment, "
-        "for example: python -m pip install -U 'ultralytics>=8.4.51'"
-    ) from exc
+    if not CHECKPOINT_PATH.exists():
+        raise FileNotFoundError(f"Model checkpoint not found: {CHECKPOINT_PATH}")
 
-_patch_openai_clip_tokenizer()
+    try:
+        from ultralytics.models.sam import SAM3SemanticPredictor
+    except Exception as exc:
+        raise RuntimeError(
+            "Ultralytics with SAM3 support is required. Install it in the sam3 conda environment, "
+            "for example: python -m pip install -U 'ultralytics>=8.4.51'"
+        ) from exc
 
-# predictor 持有已加载的 SAM3 权重，以及当前图片/特征缓存。
-# Ultralytics 推理过程中会修改 predictor 内部状态，所以所有请求
-# 后续都必须通过 semaphore 和 MODEL_LOCK 保护访问。
-predictor = SAM3SemanticPredictor(
-    overrides={
-        "model": str(CHECKPOINT_PATH),
-        "device": device,
-        "conf": 0.01,
-        "iou": ULTRALYTICS_IOU,
-        "imgsz": ULTRALYTICS_IMGSZ,
-        "half": MODEL_DTYPE == torch.float16,
-        "verbose": ULTRALYTICS_VERBOSE,
-        "save": False,
-    }
-)
-predictor.setup_model()
+    _patch_openai_clip_tokenizer()
+
+    # predictor 持有已加载的 SAM3 权重，以及当前图片/特征缓存。
+    # Ultralytics 推理过程中会修改 predictor 内部状态，所以所有请求
+    # 后续都必须通过 semaphore 和 MODEL_LOCK 保护访问。
+    predictor = SAM3SemanticPredictor(
+        overrides={
+            "model": str(CHECKPOINT_PATH),
+            "device": device,
+            "conf": 0.01,
+            "iou": ULTRALYTICS_IOU,
+            "imgsz": ULTRALYTICS_IMGSZ,
+            "half": MODEL_DTYPE == torch.float16,
+            "verbose": ULTRALYTICS_VERBOSE,
+            "save": False,
+        }
+    )
+    predictor.setup_model()
 
 print("Model loaded successfully")
 print(f"CUDA cleanup after request: {CUDA_CLEANUP_AFTER_REQUEST}")
@@ -266,7 +284,7 @@ def _sam_grounding_score_fields(score: float) -> Dict[str, float]:
 
 def _maybe_empty_cuda_cache() -> None:
     """按配置释放未使用的 CUDA cache；默认关闭，避免高并发下抖动。"""
-    if EMPTY_CUDA_CACHE_EACH_REQUEST and torch.cuda.is_available():
+    if BACKEND == "ultralytics" and EMPTY_CUDA_CACHE_EACH_REQUEST and torch.cuda.is_available():
         torch.cuda.empty_cache()
 
 
@@ -278,6 +296,11 @@ def _model_inference_context() -> Iterator[None]:
     当前图片、缓存特征、args、类别名和文本 embedding 都是共享可变状态。
     因此只要多个 HTTP 请求共用同一个 predictor，就必须串行访问模型。
     """
+    if BACKEND == "om":
+        with MODEL_LOCK:
+            predictor.setup_model()  # ACL contexts must be bound in each worker thread.
+            yield
+        return
     lock_ctx = MODEL_LOCK if SERIALIZE_MODEL_ACCESS else contextlib.nullcontext()
     autocast_ctx = _inference_autocast_context()
     with torch.inference_mode(), lock_ctx, autocast_ctx:
@@ -293,6 +316,11 @@ def run_ultralytics_prediction(
     reset_cached_image: bool = True,
 ) -> Any:
     """调用 Ultralytics predictor，并把图片/文本/框 prompt 统一传进去。"""
+    if BACKEND == "om":
+        return predictor.predict(
+            image, text=text, bboxes=bboxes, confidence_threshold=confidence_threshold,
+            reset_cached_image=reset_cached_image,
+        )
     np_image = pil_to_bgr_numpy(image)
     if reset_cached_image and hasattr(predictor, "reset_image"):
         predictor.reset_image()
@@ -313,6 +341,8 @@ def run_ultralytics_prediction(
 
 def extract_ultralytics_arrays(result: Any) -> PredictionArrays:
     """从 Ultralytics Result 对象中提取 mask、box、score、class 数组。"""
+    if isinstance(result, dict):
+        return result
     if result is None or getattr(result, "masks", None) is None or getattr(result, "boxes", None) is None:
         return _empty_prediction_arrays()
 
@@ -342,6 +372,8 @@ def extract_ultralytics_arrays(result: Any) -> PredictionArrays:
 
 def set_ultralytics_image_features(image: Image.Image) -> Dict[str, Any]:
     """设置当前图片并读取 SAM3 backbone 特征，供后续缓存推理复用。"""
+    if BACKEND == "om":
+        return predictor.set_image(image)
     predictor.set_image(pil_to_bgr_numpy(image))
     features = predictor.features
     if not isinstance(features, dict):
@@ -388,6 +420,9 @@ def run_ultralytics_cached_feature_prediction(
     confidence_threshold: float = 0.3,
 ) -> PredictionArrays:
     """基于已缓存的图片特征执行文本 prompt 推理，减少重复 backbone 计算。"""
+    if BACKEND == "om":
+        return predictor.predict(image, text=text, confidence_threshold=confidence_threshold,
+                                 reset_cached_image=False)
     features = predictor.features
     if not isinstance(features, dict):
         raise ValueError("Ultralytics SAM3 cached image features are not available")
@@ -679,7 +714,7 @@ IDLE_MODEL_UNLOADED = False
 
 def get_cuda_memory_stats() -> Optional[Dict[str, int]]:
     """读取当前 CUDA 设备的显存统计；CPU 模式下返回 None。"""
-    if not torch.cuda.is_available() or "cuda" not in device:
+    if BACKEND == "om" or not torch.cuda.is_available() or "cuda" not in device:
         return None
 
     device_index = torch.device(device).index
@@ -721,10 +756,19 @@ def _reset_predictor_runtime_state() -> None:
 
 def cleanup_cuda_runtime_state(*, unload_model: bool = False, reason: str = "request") -> None:
     """在没有活跃推理时清理 CUDA 缓存，可选地把模型卸到 CPU/置空。"""
+    global IDLE_MODEL_UNLOADED
+    if BACKEND == "om":
+        with MODEL_LOCK, INFERENCE_STATE_LOCK:
+            if ACTIVE_INFERENCE_COUNT > 0:
+                return
+            predictor.reset_image()
+            if unload_model:
+                predictor.close()
+                IDLE_MODEL_UNLOADED = True
+        return
     if not torch.cuda.is_available() or "cuda" not in device:
         return
 
-    global IDLE_MODEL_UNLOADED
     with INFERENCE_STATE_LOCK:
         # 有请求正在推理或等待模型锁时不能清 predictor 状态。
         if ACTIVE_INFERENCE_COUNT > 0:
@@ -1411,6 +1455,12 @@ def _encode_reference_visual_prompt_from_boxes(
     encode_start = time.perf_counter()
     if reference_features is None:
         reference_features = set_ultralytics_image_features(reference_image)
+    if BACKEND == "om":
+        embed, mask = predictor.encode_visual(
+            reference_features, (reference_image.height, reference_image.width),
+            reference_boxes_xywh, box_labels,
+        )
+        return embed, mask, {"reference_prompt_encode_ms": _elapsed_ms(encode_start)}
     _, reference_img_feats, reference_img_pos_embeds, reference_feat_sizes = _prepare_sam3_backbone_features(
         reference_features,
         batch=1,
@@ -1469,8 +1519,12 @@ def _build_group_visual_prompt_embeddings(
         visual_prompt_embeds.append(prompt_embed)
         visual_prompt_masks.append(prompt_mask)
 
-    merged_prompt_embed = torch.cat(visual_prompt_embeds, dim=0) if visual_prompt_embeds else None
-    merged_prompt_mask = torch.cat(visual_prompt_masks, dim=1) if visual_prompt_masks else None
+    if BACKEND == "om":
+        merged_prompt_embed = np.concatenate(visual_prompt_embeds, axis=1) if visual_prompt_embeds else None
+        merged_prompt_mask = np.concatenate(visual_prompt_masks, axis=1) if visual_prompt_masks else None
+    else:
+        merged_prompt_embed = torch.cat(visual_prompt_embeds, dim=0) if visual_prompt_embeds else None
+        merged_prompt_mask = torch.cat(visual_prompt_masks, dim=1) if visual_prompt_masks else None
     return merged_prompt_embed, merged_prompt_mask, {
         "reference_prompt_encode_ms": positive_prompt_encode_ms,
         "negative_reference_prompt_encode_ms": negative_prompt_encode_ms,
@@ -1487,6 +1541,12 @@ def _run_sam3_query_grounding_with_visual_prompt_embeddings(
     max_candidates: Optional[int] = None,
 ) -> Tuple[Dict[str, np.ndarray], Dict[str, int]]:
     """在查询图上使用已编码的 visual prompt token 做 SAM3 grounding。"""
+    if BACKEND == "om":
+        return predictor.grounding(
+            query_features, (query_image.height, query_image.width),
+            visual_prompt_embed, visual_prompt_mask, text_prompt,
+            confidence_threshold, max_candidates,
+        )
     prompt_batch = text_prompt if text_prompt is not None else ["visual"]
     if predictor.model.names != prompt_batch:
         predictor.model.set_classes(text=prompt_batch)
@@ -1637,24 +1697,10 @@ def _run_similar_query_with_reference_context(
     text_prompt, original_prompt, translated_prompt, was_translated = prepare_single_text_prompt(prompt_text)
     native_score_threshold = _native_visual_prompt_score_threshold(sam_threshold)
     max_visual_prompt_candidates = _visual_prompt_candidate_limit(top_k)
-    reference_prompt_encode_start = time.perf_counter()
-    reference_features = set_ultralytics_image_features(reference_image)
-    _, reference_img_feats, reference_img_pos_embeds, reference_feat_sizes = _prepare_sam3_backbone_features(
-        reference_features,
-        batch=1,
+    reference_visual_prompt_embed, reference_visual_prompt_mask, reference_profile = (
+        _encode_reference_visual_prompt_from_boxes(reference_image, [ref_best_xywh])
     )
-    reference_prompt = _build_sam3_geometric_prompt_from_box(
-        ref_best_xywh,
-        reference_image.width,
-        reference_image.height,
-    )
-    reference_visual_prompt_embed, reference_visual_prompt_mask = predictor.model._encode_prompt(
-        reference_img_feats,
-        reference_img_pos_embeds,
-        reference_feat_sizes,
-        reference_prompt,
-    )
-    reference_prompt_encode_ms = _elapsed_ms(reference_prompt_encode_start)
+    reference_prompt_encode_ms = reference_profile["reference_prompt_encode_ms"]
 
     set_query_start = time.perf_counter()
     query_features = set_ultralytics_image_features(query_image)
@@ -2174,15 +2220,7 @@ def _prepare_multi_similar_reference_contexts(
         reference_contexts = _prepare_multi_reference_contexts_for_one_image(group_samples, top_k)
         sample_contexts.extend(reference_contexts)
 
-    if not sample_contexts:
-        raise ValueError("all reference samples are invalid after SAM postprocess")
-
-    if not any(
-        sample_ctx.get("sample_type") != "negative"
-        for sample_ctx in sample_contexts
-    ):
-        raise ValueError("no valid positive reference sample remains after SAM postprocess")
-
+    # _validate_multi_prompt_inputs also accepts text prompts without positive samples.
     return sample_contexts
 
 
@@ -2410,7 +2448,7 @@ def _group_multi_sample_contexts_for_native_prompt(
                     for candidate in prompt_specs
                     if _prompt_spec_matches_sample_category(group["category"], candidate)
                 ]
-        if not group["positive_sample_contexts"] and text_prompt is None:
+        if not group["positive_sample_contexts"] and text_prompt is None and not applied_prompt_specs:
             continue
         finalized_categories.add(_normalize_prompt_label(group["category"]).lower())
         # 无可融合文字时保留原有的纯样例组；有多个文字条件时，为每个条件创建

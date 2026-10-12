@@ -1,0 +1,15 @@
+# ACL 由 Ascend CANN 提供，不通过 pip 安装。
+# Argos -> Stanza 依赖 torch；明确指定 +cpu，阻止 pip 选择 CUDA 构建。
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.6.0+cpu
+
+fastapi>=0.104.1,<1
+uvicorn[standard]>=0.24
+python-multipart>=0.0.6
+pillow>=10.1
+matplotlib>=3.8
+numpy>=1.26,<3
+opencv-python-headless>=4.8
+tokenizers>=0.15
+requests>=2.31
+argostranslate>=1.9
