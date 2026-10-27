@@ -5,6 +5,7 @@ model.  Routes, auth and runtime code can all depend on these constants without
 creating a model-loading side effect.
 """
 
+import math
 import os
 import sys
 from pathlib import Path
@@ -29,7 +30,11 @@ def _env_bool(name: str, default: str) -> bool:
 # 默认只读取程序自身携带的 engine，避免部署时依赖仓库中的其他目录。
 DEFAULT_ENGINE_DIR = ROOT_DIR / "engines"
 TRT_ENGINE_DIR = Path(os.getenv("SAM3_TRT_ENGINE_DIR", str(DEFAULT_ENGINE_DIR)))
+NATIVE_ENGINE_DIR = Path(os.getenv("SAM3_NATIVE_ENGINE_DIR", str(TRT_ENGINE_DIR / "native_interactive")))
 MAX_IMAGE_BYTES = int(os.getenv("SAM3_MAX_IMAGE_BYTES", str(20 * 1024 * 1024)))
+TCP_POLYGON_EPSILON = float(os.getenv("SAM3_TCP_POLYGON_EPSILON", "2.0"))
+if not math.isfinite(TCP_POLYGON_EPSILON) or not 0 <= TCP_POLYGON_EPSILON <= 50:
+    raise ValueError("SAM3_TCP_POLYGON_EPSILON must be between 0 and 50 pixels")
 SAVE_UPLOADS = _env_bool("SAM3_SAVE_UPLOADS", "1")
 MAX_CONCURRENT_INFERENCES = max(1, int(os.getenv("SAM3_MAX_CONCURRENT_INFERENCES", "4")))
 CUDA_CLEANUP_AFTER_REQUEST = _env_bool("SAM3_CUDA_CLEANUP_AFTER_REQUEST", "1")

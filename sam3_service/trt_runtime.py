@@ -20,6 +20,7 @@ from .config import (
     CUDA_CLEANUP_AFTER_REQUEST,
     MAX_CONCURRENT_INFERENCES,
     MODEL_LABEL,
+    NATIVE_ENGINE_DIR,
     SIMILAR_MODES,
     TRT_ENGINE_DIR,
     TRT_NMS_IOU,
@@ -37,7 +38,7 @@ from .image_utils import (
     normalize_box_segmentation_inputs,
     visualize_results,
 )
-from .translation import _normalize_prompt_label, split_prompt_classes, translate_to_english
+from .native_click_trt import NativeInteractiveBackend
 
 
 LOGGER = logging.getLogger(__name__)
@@ -130,7 +131,7 @@ class TRTModule:
 
 
 class Sam3TensorRTRuntime:
-    """持有四个 SAM3 engine，并提供可复用的编码和解码操作。"""
+    """HTTP/TCP 共享图像编码器，分别使用检测和原生点击解码头。"""
 
     MAX_GEOMETRY_BOXES = 20
     MAX_DECODER_GEOMETRY_TOKENS = 28
@@ -141,10 +142,12 @@ class Sam3TensorRTRuntime:
             raise FileNotFoundError(f"TensorRT engine 目录不存在: {self.model_dir}")
         compute_capability = cp.cuda.Device(0).compute_capability
         suffix = f"_sm{compute_capability}_trt{trt.__version__}"
-        self.vision_encoder = TRTModule(self._find_engine("vision-encoder", suffix))
+        # One dual-neck encoder replaces both separate image encoders in GPU memory.
+        self.vision_encoder = TRTModule(self._find_engine("shared-image-encoder", suffix))
         self.text_encoder = TRTModule(self._find_engine("text-encoder", suffix))
         self.geometry_encoder = TRTModule(self._find_engine("geometry-encoder", suffix))
         self.decoder = TRTModule(self._find_engine("decoder", suffix))
+        self.interactive = NativeInteractiveBackend(NATIVE_ENGINE_DIR, encoder=self.vision_encoder)
 
         input_shape = self.vision_encoder.get_tensor_shape("images")
         self.target_height = int(input_shape[2])
@@ -169,7 +172,8 @@ class Sam3TensorRTRuntime:
         """按导出模型的 [-1, 1] RGB 规则预处理图片并提取 FPN 特征。"""
         rgb = np.asarray(image.convert("RGB").resize((self.target_width, self.target_height), Image.Resampling.BILINEAR))
         pixel_values = (rgb.astype(np.float32) / 127.5 - 1.0).transpose(2, 0, 1)[None]
-        return self.vision_encoder(images=pixel_values)
+        output = self.vision_encoder(images=pixel_values)
+        return {name: output[name] for name in ("fpn_feat_0", "fpn_feat_1", "fpn_feat_2", "fpn_pos_2")}
 
     def encode_text(self, text: Optional[str]) -> Tuple[cp.ndarray, cp.ndarray]:
         if text:
@@ -355,6 +359,9 @@ def _normalize_pic_id(pic_id: Optional[str]) -> str:
 
 
 def _prepare_detection_classes(prompt: str) -> Tuple[List[Dict[str, Any]], str, bool]:
+    # Box-only TCP inference must not initialize or install Argos translation resources.
+    from .translation import split_prompt_classes, translate_to_english
+
     original_classes = split_prompt_classes(prompt)
     if not original_classes:
         raise ValueError("Prompt is empty after parsing. Use '#' to separate classes.")
@@ -589,6 +596,8 @@ def _normalize_sample_type(sample: Dict[str, Any]) -> str:
 
 
 def _normalize_samples(samples: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    from .translation import _normalize_prompt_label
+
     normalized = []
     for index, sample in enumerate(samples):
         category = _normalize_prompt_label(str(sample.get("category", "") or ""))
@@ -615,6 +624,8 @@ def _normalize_samples(samples: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]
 
 
 def _prompt_specs(prompt_text: Optional[str], prompt_category_map: Optional[Dict[str, str]]) -> List[Dict[str, Any]]:
+    from .translation import _normalize_prompt_label, split_prompt_classes, translate_to_english
+
     specs = []
     if prompt_category_map:
         prompt_items = prompt_category_map.items()
@@ -638,6 +649,8 @@ def _prompt_specs(prompt_text: Optional[str], prompt_category_map: Optional[Dict
 
 def _categories_match(sample_category: str, prompt_category: str) -> bool:
     """同时比较原始类别和英文翻译，兼容“人/person”这类映射。"""
+    from .translation import _normalize_prompt_label, translate_to_english
+
     sample_normalized = _normalize_prompt_label(sample_category).lower()
     prompt_normalized = _normalize_prompt_label(prompt_category).lower()
     sample_variants = {
@@ -677,6 +690,8 @@ def prepare_multi_visual_prompt_state(
     prompt_category_map: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     """预编码样例图 visual prompt，URL/视频任务可以跨查询图复用。"""
+    from .translation import _normalize_prompt_label, translate_to_english
+
     normalized_samples = _normalize_samples(samples)
     specs = _prompt_specs(prompt_text, prompt_category_map)
     grouped: Dict[str, Dict[str, Any]] = {}
@@ -949,6 +964,8 @@ def run_similar_object_batch_pipeline(
     similar_mode: str = "feature_match",
     prompt: Optional[str] = None,
 ) -> Dict[str, Any]:
+    from .translation import _normalize_prompt_label
+
     if similar_mode not in SIMILAR_MODES:
         raise ValueError(f"similar_mode must be one of: {', '.join(sorted(SIMILAR_MODES))}")
     if reference_bnd_points is None:

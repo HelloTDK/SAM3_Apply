@@ -22,7 +22,7 @@ _vendor/
 api_keys.json
 *.pem
 *.key
-
+Onnx-Models
 # Runtime outputs
 uploads/
 results/
@@ -53,3 +53,4 @@ Thumbs.db
 *.swp
 *.swo
 *.pid
+*.tar.gz

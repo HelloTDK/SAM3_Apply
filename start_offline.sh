@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+case "$#:${1:-}" in
+  1:--background) SAM3_FOREGROUND=0 ;;
+  0:) ;;
+  *) echo "Usage: $0 [--background]" >&2; exit 2 ;;
+esac
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
 
@@ -55,10 +61,15 @@ fi
 
 export SAM3_HOST="${SAM3_HOST:-0.0.0.0}"
 export SAM3_PORT="${SAM3_PORT:-8006}"
+# TCP and HTTP are started by the same Python process; override these ports here or via env.
+export SAM3_TCP_HOST="${SAM3_TCP_HOST:-0.0.0.0}"
+export SAM3_TCP_PORT="${SAM3_TCP_PORT:-6063}"
+export SAM3_TCP_POLYGON_EPSILON="${SAM3_TCP_POLYGON_EPSILON:-0.5}"
 if [ -z "${SAM3_TRT_ENGINE_DIR:-}" ]; then
   # 默认只使用当前程序内置的 TensorRT engine。
   export SAM3_TRT_ENGINE_DIR="${SCRIPT_DIR}/engines"
 fi
+export SAM3_NATIVE_ENGINE_DIR="${SAM3_NATIVE_ENGINE_DIR:-${SAM3_TRT_ENGINE_DIR}/native_interactive}"
 
 python - <<'PY'
 try:
@@ -72,9 +83,15 @@ except Exception as exc:
     )
 PY
 
-for engine_name in vision-encoder text-encoder geometry-encoder decoder; do
+for engine_name in shared-image-encoder text-encoder geometry-encoder decoder; do
   if ! find "${SAM3_TRT_ENGINE_DIR}" -maxdepth 1 -type f -name "${engine_name}*.engine" -print -quit | grep -q .; then
     echo "ERROR: missing ${engine_name} engine in ${SAM3_TRT_ENGINE_DIR}"
+    exit 1
+  fi
+done
+for engine_name in interactive-decoder-first interactive-decoder-refine; do
+  if [ ! -f "${SAM3_NATIVE_ENGINE_DIR}/${engine_name}.engine" ]; then
+    echo "ERROR: missing ${engine_name}.engine in ${SAM3_NATIVE_ENGINE_DIR}"
     exit 1
   fi
 done
@@ -99,9 +116,12 @@ export SAM3_MAX_CONCURRENT_INFERENCES="${SAM3_MAX_CONCURRENT_INFERENCES:-4}"
 export SAM3_TRT_NMS_IOU="${SAM3_TRT_NMS_IOU:-0.7}"
 export SAM3_CUDA_CLEANUP_AFTER_REQUEST="${SAM3_CUDA_CLEANUP_AFTER_REQUEST:-1}"
 
-echo "Starting SAM3 TensorRT offline service..."
+echo "Starting SAM3 TensorRT HTTP + TCP offline service..."
 echo "HOST=${SAM3_HOST} PORT=${SAM3_PORT}"
+echo "TCP_HOST=${SAM3_TCP_HOST} TCP_PORT=${SAM3_TCP_PORT}"
+echo "TCP_POLYGON_EPSILON=${SAM3_TCP_POLYGON_EPSILON}"
 echo "TRT_ENGINE_DIR=${SAM3_TRT_ENGINE_DIR}"
+echo "NATIVE_ENGINE_DIR=${SAM3_NATIVE_ENGINE_DIR}"
 echo "TRT_ROOT=${SAM3_TRT_ROOT}"
 echo "CUDA_HOME=${SAM3_CUDA_HOME}"
 echo "ARGOS_PACKAGES_DIR=${ARGOS_PACKAGES_DIR}"
@@ -112,7 +132,9 @@ echo "CUDA_CLEANUP_AFTER_REQUEST=${SAM3_CUDA_CLEANUP_AFTER_REQUEST}"
 
 export SAM3_PID_FILE="${SAM3_PID_FILE:-${SCRIPT_DIR}/sam3_offline.pid}"
 export SAM3_LOG_FILE="${SAM3_LOG_FILE:-${SCRIPT_DIR}/start_offline.log}"
+# --background overrides Docker's inherited foreground setting for interactive launches.
 export SAM3_FOREGROUND="${SAM3_FOREGROUND:-0}"
+export SAM3_STARTUP_TIMEOUT_SECONDS="${SAM3_STARTUP_TIMEOUT_SECONDS:-180}"
 
 if [ "${SAM3_FOREGROUND}" = "1" ]; then
   echo "Running in foreground mode."
@@ -135,13 +157,66 @@ echo "Running in background mode."
 echo "PID_FILE=${SAM3_PID_FILE}"
 echo "LOG_FILE=${SAM3_LOG_FILE}"
 printf '\n[%s] Starting SAM3 offline service\n' "$(date '+%Y-%m-%d %H:%M:%S')" >> "${SAM3_LOG_FILE}"
-nohup python sam_app.py >> "${SAM3_LOG_FILE}" 2>&1 &
+nohup python sam_app.py >> "${SAM3_LOG_FILE}" 2>&1 </dev/null &
 new_pid="$!"
 echo "${new_pid}" > "${SAM3_PID_FILE}"
 
-sleep 1
-if ! kill -0 "${new_pid}" 2>/dev/null; then
-  echo "ERROR: SAM3 offline service failed to start. Last log lines:"
+if ! SAM3_SERVICE_PID="${new_pid}" python - <<'PY'
+import http.client
+import os
+import socket
+import time
+
+
+def loopback_for_wildcard(host):
+    # Probe wildcard listeners through loopback, while preserving explicit bind addresses.
+    return "127.0.0.1" if host in {"", "0.0.0.0", "::"} else host
+
+
+pid = int(os.environ["SAM3_SERVICE_PID"])
+http_host = loopback_for_wildcard(os.environ["SAM3_HOST"])
+tcp_host = loopback_for_wildcard(os.environ["SAM3_TCP_HOST"])
+http_port = int(os.environ["SAM3_PORT"])
+tcp_port = int(os.environ["SAM3_TCP_PORT"])
+deadline = time.monotonic() + int(os.environ["SAM3_STARTUP_TIMEOUT_SECONDS"])
+last_error = "waiting for listeners"
+
+while time.monotonic() < deadline:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        raise SystemExit("SAM3 process exited during startup")
+    # A failed child can remain as a zombie until this launcher reaps it.
+    try:
+        with open(f"/proc/{pid}/stat") as process_stat:
+            if process_stat.read().rsplit(")", 1)[1].split()[0] == "Z":
+                raise SystemExit("SAM3 process exited during startup")
+    except FileNotFoundError:
+        raise SystemExit("SAM3 process exited during startup")
+
+    try:
+        connection = http.client.HTTPConnection(http_host, http_port, timeout=2)
+        connection.request("GET", "/health")
+        response = connection.getresponse()
+        response.read()
+        connection.close()
+        if response.status != 200:
+            raise RuntimeError(f"HTTP health check returned {response.status}")
+
+        with socket.create_connection((tcp_host, tcp_port), timeout=2):
+            pass
+        print(f"HTTP and TCP are ready on {http_port} and {tcp_port}.")
+        break
+    except (OSError, TimeoutError, RuntimeError) as exc:
+        last_error = str(exc)
+        time.sleep(1)
+else:
+    raise SystemExit(f"Timed out waiting for HTTP {http_port} and TCP {tcp_port}: {last_error}")
+PY
+then
+  echo "ERROR: SAM3 HTTP + TCP service failed to start. Last log lines:"
+  kill "${new_pid}" 2>/dev/null || true
+  wait "${new_pid}" 2>/dev/null || true
   tail -n 80 "${SAM3_LOG_FILE}" || true
   rm -f "${SAM3_PID_FILE}"
   exit 1
